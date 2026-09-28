@@ -1,0 +1,61 @@
+name: Pages
+
+# The phone page (site/phone) and the landing page (docs/index.html), published to GitHub Pages.
+#
+# The phone page has to live somewhere with https — a browser gives the microphone and WebCrypto only to
+# a secure origin — and since mTiles no longer opens a port, it cannot be served by mTiles itself. See
+# docs/adr/0006-phone-over-relays.md. Weekly as well as on a change, because the DERP map is copied in
+# here: the page must read it from its own origin (tailcat.dev serves it without a CORS header), and a
+# map that goes stale names relays that have moved.
+on:
+  push:
+    branches: [master]
+    paths: ['site/**', 'docs/index.html', 'docs/favicon.ico', '.github/workflows/pages.yml']
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the page
+        run: node --test site/phone/test/*.test.mjs
+
+      - name: Assemble
+        run: |
+          set -euo pipefail
+          mkdir -p _site/phone/fonts
+          cp docs/index.html docs/favicon.ico _site/
+          rsync -a --exclude test --exclude serve.mjs site/phone/ _site/phone/
+          cp src/mTiles/Assets/Fonts/JetBrainsMono/JetBrainsMono-Regular.ttf \
+             src/mTiles/Assets/Fonts/JetBrainsMono/JetBrainsMono-Bold.ttf _site/phone/fonts/
+          cp licenses/JetBrainsMono/OFL.txt _site/phone/fonts/OFL.txt
+          curl -fsSL --retry 3 https://tailcat.dev/derpmap.json -o _site/phone/derpmap.json
+          # A map with no regions would pair nothing; fail here rather than publish it.
+          python3 -c "import json,sys; m=json.load(open('_site/phone/derpmap.json')); sys.exit(0 if m.get('Regions') else 1)"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
