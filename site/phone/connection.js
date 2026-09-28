@@ -78,6 +78,11 @@ function deviceName() {
   return browser ? `${device} · ${browser}` : device;
 }
 
+/** What a request is told when the connection was closed under it, rather than left unanswered. */
+function closedError() {
+  return new Error("The connection was closed.");
+}
+
 /**
  * One mTiles, connected. `onPush(message)` is called for everything it pushes; `onState(state)` with
  * "connecting", "connected", "reconnecting" or "refused".
@@ -104,7 +109,7 @@ export class Connection {
       derpMap: new URL("derpmap.json", location.href).href,
     });
     // Closed while the relay was being joined: the link would live on with nobody listening to it.
-    if (this.#closed) { await link.close().catch(() => {}); throw new Error("The connection was closed."); }
+    if (this.#closed) { await link.close().catch(() => {}); throw closedError(); }
     this.#link = link;
     // Joined means mTiles now holds this phone as paired: stored before the hello, so a hello that fails
     // leaves a computer the list can still retry and log out of after a reload.
@@ -121,7 +126,7 @@ export class Connection {
 
     const hello = await this.request({ type: "hello", protocol: PROTOCOL });
     // A computer logged out of meanwhile must not come back into the list of paired ones.
-    if (this.#closed) throw new Error("The connection was closed.");
+    if (this.#closed) throw closedError();
     remember({ id, name: hello.machine ?? "mTiles" });
     this.#onState("connected");
     return hello;
@@ -129,10 +134,16 @@ export class Connection {
 
   /** Asks mTiles something. Resolves with its answer, or throws an Error carrying its sentence. */
   async request(message) {
+    // Closed — logged out of, or replaced by a retry — is said as what it is, not as a computer that
+    // did not answer.
+    if (this.#closed) throw closedError();
+    // Still joining the relay: not closed, and not a computer that failed to answer either.
+    if (!this.#link) throw new Error("Not connected to mTiles yet.");
     let text;
     try {
       text = await this.#link.request(JSON.stringify(message));
     } catch (error) {
+      if (this.#closed) throw closedError();
       if (error instanceof PairingRefusedError) {
         this.#onState("refused");
         throw new Error("This phone is no longer paired with that computer. Scan a new code.");
