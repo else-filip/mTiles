@@ -5,22 +5,31 @@
 // Each machine this browser has paired with gets a stored identity of its own, named after the machine's
 // public key, so one phone can hold a desktop and a laptop.
 
+import { invitationCodeFrom } from "./computers.js";
 import { TailcatLink, parseInvitationCode, PairingRefusedError } from "./vendor/tailcat-link/index.js";
 
 export const PROTOCOL = 1;
 const MACHINES = "mtiles.machines";
 const LAST = "mtiles.lastMachine";
 
-/** The machines this browser is paired with, newest last. */
+/** The machines this browser is paired with, in the order they were first paired. */
 export function knownMachines() {
   try { return JSON.parse(localStorage.getItem(MACHINES) ?? "[]"); } catch { return []; }
 }
 
+/** Keeps a machine's place in the list and refreshes its name: every connection says hello, and a list
+ *  that reordered itself on each one would move the rows under the user's finger. */
 function remember(machine) {
-  const list = knownMachines().filter((m) => m.id !== machine.id);
-  list.push(machine);
+  const list = knownMachines();
+  const at = list.findIndex((m) => m.id === machine.id);
+  if (at >= 0) list[at] = machine;
+  else list.push(machine);
   localStorage.setItem(MACHINES, JSON.stringify(list));
-  localStorage.setItem(LAST, machine.id);
+}
+
+/** The machine the page opens on next time: the one last on screen. */
+export function setLastMachine(id) {
+  localStorage.setItem(LAST, id);
 }
 
 export function forgetMachine(id) {
@@ -40,8 +49,15 @@ export function takeInvitationFromUrl() {
   const hash = location.hash.slice(1);
   if (!hash) return null;
   history.replaceState(null, "", location.pathname + location.search);
+  return parseInvitation(hash);
+}
+
+/** An invitation out of what the user pasted: the whole link, or only the code after its `#`. Null for
+ *  anything else. */
+export function parseInvitation(text) {
+  const code = invitationCodeFrom(text);
+  if (!code) return null;
   try {
-    const code = decodeURIComponent(hash);
     const { address } = parseInvitationCode(code);
     return { code, id: hex(address.serverPublic).slice(0, 12) };
   } catch {
@@ -68,6 +84,7 @@ function deviceName() {
  */
 export class Connection {
   #link = null;
+  #closed = false;
   #onPush;
   #onState;
 
@@ -86,7 +103,12 @@ export class Connection {
       displayName: deviceName(),
       derpMap: new URL("derpmap.json", location.href).href,
     });
+    // Closed while the relay was being joined: the link would live on with nobody listening to it.
+    if (this.#closed) { await link.close().catch(() => {}); throw new Error("The connection was closed."); }
     this.#link = link;
+    // Joined means mTiles now holds this phone as paired: stored before the hello, so a hello that fails
+    // leaves a computer the list can still retry and log out of after a reload.
+    remember({ id, name: knownMachines().find((m) => m.id === id)?.name ?? "mTiles" });
 
     link.onNotify((text) => {
       try { this.#onPush(JSON.parse(text)); } catch { /* not ours to understand */ }
@@ -98,6 +120,8 @@ export class Connection {
     link.events?.addEventListener?.("connected", () => this.#onState("connected"));
 
     const hello = await this.request({ type: "hello", protocol: PROTOCOL });
+    // A computer logged out of meanwhile must not come back into the list of paired ones.
+    if (this.#closed) throw new Error("The connection was closed.");
     remember({ id, name: hello.machine ?? "mTiles" });
     this.#onState("connected");
     return hello;
@@ -121,6 +145,7 @@ export class Connection {
   }
 
   async close() {
+    this.#closed = true;
     const link = this.#link;
     this.#link = null;
     await link?.close().catch(() => {});

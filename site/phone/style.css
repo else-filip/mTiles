@@ -154,6 +154,20 @@ button.quiet { background: none; border-color: transparent; color: var(--muted);
 }
 .ws-filter[hidden] { display: none; }
 .ws-list { display: grid; gap: 2px; }
+/* computers: the workspace rows' shape, with a way into each computer's own menu */
+.pc-page { display: grid; gap: 14px; }
+.pc-row { display: flex; align-items: stretch; border-radius: var(--radius-row); border-left: 3px solid transparent; }
+.pc-row.current { background: var(--raised); border-left-color: var(--accent); }
+.pc-row.blocked { border-left-color: var(--danger); }
+.pc-row.down .ws-name { color: var(--muted); }
+.pc-open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; text-align: left; background: none; border: 0; padding: 10px 12px; min-height: 60px; }
+.pc-more { flex: none; width: 44px; padding: 0; display: grid; place-items: center; background: none; border: 0; color: var(--muted); }
+.pc-add { justify-self: start; display: flex; align-items: center; gap: 8px; background: none; border-style: dashed; color: var(--text); }
+.pc-add .icon { width: 18px; height: 18px; }
+.bar .elsewhere { min-height: 36px; width: 36px; padding: 0; display: grid; place-items: center; background: var(--danger-ground); border-color: color-mix(in srgb, var(--danger) 45%, var(--edge)); border-radius: 50%; }
+.sheet-text { margin: 0 0 6px; color: var(--body); font-size: var(--fs-sm); }
+.paste-link { display: flex; gap: 8px; width: 100%; }
+.paste-link input { flex: 1; min-width: 0; }
 .ws-pin { flex: none; display: grid; place-items: center; color: var(--k-usage); }
 .ws-pin .icon { width: 16px; height: 16px; fill: currentColor; }
 .ws-row {

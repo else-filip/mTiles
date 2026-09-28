@@ -1763,6 +1763,12 @@ What is worth knowing before touching `Services/Phone/` or `site/phone/`:
 - **Audio is one channel per utterance** — a JSON header (tile, sample rate), 16-bit PCM, a one-byte
   zero frame to cancel, and the channel closing on purpose to end the sentence; ended with the session
   it is a cancel. Ordered within itself, which a request followed by frames would not be.
+- **One phone, several computers, all connected at once** (`site/phone/app.js` → *computers*): each
+  paired mTiles has its own link and its own picture of its workspaces, so the Computers list says which
+  one is waiting for you, a header mark says so from inside another, and switching is instant. The
+  one left is told to watch nothing, so only the computer on screen pushes layouts and tiles. A second
+  computer is paired by scanning its code, or by pasting the link under it — the route for a page added
+  to the home screen, which the camera opens in the browser instead.
 - **`IAudioCapture` is the seam.** `PhoneAudioCapture` implements it and `RoutedAudioCapture` picks
   between it and the microphone per recording, so `DictationService` gained a second input without
   gaining a line of code.

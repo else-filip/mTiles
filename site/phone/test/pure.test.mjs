@@ -95,3 +95,37 @@ test("how long ago is said in one unit, and not at all under a minute", () => {
   assert.equal(ago(3 * 3_600_000 + 5), "3h");
   assert.equal(ago(50 * 3_600_000), "2d");
 });
+
+import { attentionOf, computerStatus, invitationCodeFrom } from "../computers.js";
+
+const pc = (connState, ...activities) => ({ connState, workspaces: activities.map((activity) => ({ activity })) });
+
+test("a computer out of reach asks for nothing, whatever it said before", () => {
+  assert.deepEqual(attentionOf(pc("failed", "blocked", "working")), { activity: null, blocked: 0, working: 0 });
+});
+
+test("blocked outranks working in a computer's mark", () => {
+  assert.deepEqual(attentionOf(pc("connected", "working", "blocked", "blocked")), { activity: "blocked", blocked: 2, working: 1 });
+  assert.equal(attentionOf(pc("reconnecting", "working")).activity, "working");
+});
+
+test("a computer's row says what it is doing, counted", () => {
+  const cases = [
+    [pc("connecting"), "Connecting…"],
+    [pc("refused", "blocked"), "Not paired any more"],
+    [pc("connected", "blocked"), "1 workspace waiting for you"],
+    [pc("connected", "blocked", "blocked"), "2 workspaces waiting for you"],
+    [pc("connected", "working"), "1 workspace working"],
+    [pc("connected", "blocked", "working"), "1 waiting for you, 1 working"],
+    [pc("connected", "idle"), "Nothing running"],
+    [pc("connected"), "No workspaces"],
+  ];
+  for (const [m, expected] of cases) assert.equal(computerStatus(m), expected);
+});
+
+test("a pasted invitation is the code, from the whole link or on its own", () => {
+  assert.equal(invitationCodeFrom("https://x.github.io/phone/#abc%20d"), "abc d");
+  assert.equal(invitationCodeFrom("  abc  "), "abc");
+  assert.equal(invitationCodeFrom("   "), null);
+  assert.equal(invitationCodeFrom("https://x/#%E0%A4%A"), null);
+});

@@ -10,9 +10,10 @@
 import { h, fill, activityMark, icon } from "./dom.js";
 import { parse, render } from "./markdown.js";
 import { layoutRects, isLegible, readingOrder } from "./geometry.js";
-import { Connection, knownMachines, lastMachineId, takeInvitationFromUrl, forgetMachine, PROTOCOL } from "./connection.js";
+import { Connection, knownMachines, lastMachineId, setLastMachine, takeInvitationFromUrl, parseInvitation, forgetMachine, PROTOCOL } from "./connection.js";
 import { Dictation } from "./dictation.js";
 import { ago } from "./format.js";
+import { isUp, attentionOf, computerStatus } from "./computers.js";
 import { orderWorkspaces, matchesQuery, FILTER_THRESHOLD } from "./workspaces.js";
 
 const KINDS = {
@@ -28,15 +29,9 @@ const KIND_ACCENT = {
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
 const state = {
-  machine: null,          // { id, name }
-  conn: null,
-  connState: "idle",      // idle | connecting | connected | reconnecting | refused | failed
-  hello: null,
-  session: null,          // { dictation: { available, state, tileId }, activeTileId }
-  workspaces: [],
-  layout: null,           // RemoteLayout of state.workspaceId
+  layout: null,           // RemoteLayout of state.workspaceId, on the computer on screen
   tile: null,             // RemoteTileView of state.tileId
-  level: "workspaces",
+  level: "workspaces",    // computers | workspaces | layout | tile
   workspaceId: null,
   tileId: null,
   keysOpen: false,
@@ -44,8 +39,51 @@ const state = {
   answers: {},            // pendingId -> { questionId -> [labels] }
   answerChips: 0,         // moves when a chip is toggled — typing does not redraw, or the field loses focus
   sending: false,
-  clockOffset: 0,         // mTiles' clock less this phone's, from the hello — cards' times are mTiles'
 };
+
+// ── computers ─────────────────────────────────────────────────────────────────────────────────
+//
+// Every computer this phone is paired with is connected at once, not only the one on screen: that is
+// what lets the list of computers say which one needs you, and what makes switching to one instant. Each
+// holds its own link and its own picture of its workspaces; `state.conn`, `state.workspaces` and the rest
+// of the fields below always mean the computer on screen.
+
+/** id -> { id, name, conn, connState, hello, session, workspaces, clockOffset, error } */
+const machines = new Map();
+let currentId = null;
+
+const MACHINE_DEFAULTS = {
+  conn: null,
+  connState: "unpaired",  // unpaired | connecting | connected | reconnecting | refused | failed | page-old | app-old
+  hello: null,
+  session: null,          // { dictation: { available, state, tileId }, activeTileId }
+  workspaces: [],
+  clockOffset: 0,         // mTiles' clock less this phone's, from the hello — cards' times are mTiles'
+  error: null,
+};
+
+for (const key of Object.keys(MACHINE_DEFAULTS)) {
+  Object.defineProperty(state, key, {
+    get: () => machines.get(currentId)?.[key] ?? MACHINE_DEFAULTS[key],
+    set: (value) => { const m = machines.get(currentId); if (m) m[key] = value; },
+  });
+}
+Object.defineProperty(state, "machine", { get: () => machines.get(currentId) ?? null });
+
+function machineFor(id) {
+  let m = machines.get(id);
+  if (!m) {
+    const known = knownMachines().find((k) => k.id === id);
+    m = { id, name: known?.name ?? "mTiles", ...MACHINE_DEFAULTS, workspaces: [] };
+    machines.set(id, m);
+  }
+  return m;
+}
+
+const isCurrent = (m) => m.id === currentId;
+
+/** Whether a computer other than the one on screen has something waiting for you. */
+const elsewhereNeedsYou = () => [...machines.values()].some((m) => !isCurrent(m) && attentionOf(m).blocked > 0);
 
 const root = document.getElementById("app");
 const bar = h("header.bar");
@@ -60,55 +98,109 @@ const dictation = new Dictation({ getLink: () => state.conn?.link, onError: (m) 
 
 async function start() {
   const invitation = takeInvitationFromUrl();
-  const machines = knownMachines();
-  const id = invitation?.id ?? lastMachineId() ?? machines.at(-1)?.id;
+  const known = knownMachines();
+  const first = invitation?.id ?? lastMachineId() ?? known.at(-1)?.id;
 
-  if (!id) {
-    state.connState = "unpaired";
+  if (!first) {
     draw();
     return;
   }
 
-  await connect(id, invitation?.code ?? null);
+  // Back from a computer's workspaces is the list of computers, so that is where the history starts.
+  currentId = first;
+  machineFor(first);
+  history.replaceState({ level: "computers" }, "");
+  go("workspaces", { machineId: first });
+
+  connect(first, invitation?.code ?? null);
+  for (const m of known) {
+    if (m.id !== first) connect(m.id, null);
+  }
 }
 
 async function connect(id, code) {
-  await state.conn?.close();
-  state.machine = knownMachines().find((m) => m.id === id) ?? { id, name: "mTiles" };
-  state.workspaces = [];
-  state.layout = null;
-  state.tile = null;
-  state.connState = "connecting";
+  const m = machineFor(id);
+  // The new link is this computer's before anything is awaited, so a second call cannot leave two alive,
+  // and a link that has been replaced is not listened to any more.
+  const previous = m.conn;
+  const conn = new Connection({
+    onPush: (message) => { if (m.conn === conn) onPush(m, message); },
+    onState: (next) => { if (m.conn === conn) onConnectionState(m, next); },
+  });
+  m.conn = conn;
+  await previous?.close();
+  if (m.conn !== conn) return;
+  m.workspaces = [];
+  m.connState = "connecting";
+  m.error = null;
+  if (isCurrent(m)) { state.layout = null; state.tile = null; }
   draw();
 
-  const conn = new Connection({ onPush, onState: onConnectionState });
-  state.conn = conn;
-
   try {
-    state.hello = await conn.open({ id, code });
-    state.machine = { id, name: state.hello.machine ?? "mTiles" };
-    if (!state.hello.compatible) {
-      state.connState = state.hello.protocol > PROTOCOL ? "page-old" : "app-old";
+    const hello = await conn.open({ id, code });
+    if (m.conn !== conn) return; // replaced meanwhile — a retry, or a log-out
+    m.hello = hello;
+    m.name = hello.machine ?? m.name;
+    if (isCurrent(m)) setLastMachine(id);
+    if (!hello.compatible) {
+      m.connState = hello.protocol > PROTOCOL ? "page-old" : "app-old";
       draw();
       return;
     }
-    state.session = state.hello.session ?? null;
-    state.clockOffset = typeof state.hello.now === "number" ? state.hello.now - Date.now() : 0;
+    m.session = hello.session ?? null;
+    m.clockOffset = typeof hello.now === "number" ? hello.now - Date.now() : 0;
     const { workspaces } = await conn.request({ type: "workspaces" });
-    state.workspaces = workspaces;
-    state.connState = "connected";
-    await watch();
+    m.workspaces = workspaces;
+    m.connState = "connected";
+    // mTiles remembers what a phone watched across a reconnect, so a computer in the background is told
+    // outright to push nothing but its list.
+    if (isCurrent(m)) await watch();
+    else watchNothing(m);
   } catch (error) {
-    state.connState = /no longer paired|not been paired/.test(error.message) ? "refused" : "failed";
-    state.error = error.message;
+    if (m.conn !== conn) return;
+    // Only a join that never succeeded is abandoned: once the relay has joined, mTiles holds this phone as
+    // paired and the stored identity is what "Try again" reconnects with.
+    if (code && !conn.link && !isPaired(id)) { abandonPairing(m, error.message); return; }
+    m.connState = /no longer paired|not been paired/.test(error.message) ? "refused" : "failed";
+    m.error = error.message;
   }
   draw();
 }
 
-function onPush(message) {
+/** Out of reach and not trying: connecting again is offered only then, so a pairing still under way is
+ *  not replaced by a join without its code. */
+const isDown = (m) => !isUp(m) && m.connState !== "connecting";
+
+const isPaired = (id) => knownMachines().some((k) => k.id === id);
+
+/** A first pairing that failed leaves nothing behind: without a pairing there is nothing to retry, and
+ *  the code it came with is spent or wrong. */
+function abandonPairing(m, reason) {
+  const conn = m.conn;
+  m.conn = null;
+  conn?.close();
+  machines.delete(m.id);
+  say(`Pairing failed: ${reason}`, "error");
+  // Somebody who has moved on to another computer meanwhile is left where they are.
+  if (!isCurrent(m)) { draw(); return; }
+  putNextOnScreen();
+  go(currentId ? "computers" : "workspaces");
+}
+
+function onPush(m, message) {
+  if (!isCurrent(m)) {
+    // A computer in the background is listened to only for what the list of computers shows.
+    const before = elsewhereNeedsYou();
+    if (message.type === "session") m.session = message;
+    else if (message.type === "workspaces") m.workspaces = message.workspaces ?? [];
+    else { sayFrom(m, message); return; }
+    if (state.level === "computers" || before !== elsewhereNeedsYou()) draw();
+    return;
+  }
+
   switch (message.type) {
-    case "session": state.session = message; break;
-    case "workspaces": state.workspaces = message.workspaces ?? []; break;
+    case "session": m.session = message; break;
+    case "workspaces": m.workspaces = message.workspaces ?? []; break;
     case "layout":
       if (message.layout?.workspaceId === state.workspaceId) state.layout = message.layout;
       break;
@@ -119,10 +211,8 @@ function onPush(message) {
       if (message.tileId === state.tileId) { say("That tile was closed on the computer."); go("layout"); return; }
       break;
     case "text":
-      say(`Heard: ${message.message}`);
-      break;
     case "error":
-      say(message.message, "error");
+      sayFrom(m, message);
       break;
     default:
       return;
@@ -130,18 +220,36 @@ function onPush(message) {
   draw();
 }
 
+/** What a computer says back — a dictated sentence heard, or an error — is said whichever computer is on
+ *  screen, named when it is not the one on screen, so a sentence sent before switching is not lost. */
+function sayFrom(m, message) {
+  if (message.type !== "text" && message.type !== "error") return;
+  const from = isCurrent(m) ? "" : `${m.name}: `;
+  if (message.type === "text") say(`${from}Heard: ${message.message}`);
+  else say(`${from}${message.message}`, "error");
+}
+
 /** A link back after a drop meets an mTiles that may have restarted and forgotten what this page watches. */
-function onConnectionState(next) {
-  const reconnected = state.connState === "reconnecting" && next === "connected";
-  state.connState = next;
+function onConnectionState(m, next) {
+  // While the hello and the first list are on their way, "connected" is `connect`'s to say.
+  if (next === "connected" && m.connState === "connecting") return;
+  const reconnected = m.connState === "reconnecting" && next === "connected";
+  m.connState = next;
   draw();
-  if (reconnected) watch();
+  if (!reconnected) return;
+  if (isCurrent(m)) watch();
+  else watchNothing(m);
+}
+
+/** Tells a computer in the background to push no layout and no tile: only its list is listened to. */
+function watchNothing(m) {
+  m.conn?.request({ type: "watch", workspaceId: null, tileId: null }).catch(() => {});
 }
 
 /** Tells mTiles what this page is looking at, so that is what it pushes. */
 async function watch() {
   if (!state.conn || state.connState !== "connected") return;
-  const workspaceId = state.level === "workspaces" ? null : state.workspaceId;
+  const workspaceId = depth(state.level) <= depth("workspaces") ? null : state.workspaceId;
   const tileId = state.level === "tile" ? state.tileId : null;
   try { await state.conn.request({ type: "watch", workspaceId, tileId }); } catch { /* the next push corrects it */ }
 }
@@ -158,38 +266,69 @@ async function ask(message) {
 // ── navigation ────────────────────────────────────────────────────────────────────────────────
 
 /** Moves to a level. `from` is the element the zoom grows out of, when there is one. */
-function go(level, { workspaceId, tileId, from } = {}, push = true) {
+function go(level, { machineId, workspaceId, tileId, from } = {}, push = true) {
   const before = state.level;
+  // The list of computers belongs to none of them, so reaching it — Back included — keeps the current one.
+  if (level !== "computers" && machineId && machineId !== currentId && machines.has(machineId)) switchTo(machineId);
   state.level = level;
   if (workspaceId !== undefined) state.workspaceId = workspaceId;
   if (tileId !== undefined) state.tileId = tileId;
   if (level !== "tile") { state.tile = null; state.keysOpen = false; state.actionsOpen = false; lastTileKey = lastDockKey = null; }
-  if (level === "workspaces") state.layout = null;
+  if (depth(level) <= depth("workspaces")) state.layout = null;
 
-  if (push) history.pushState({ level, workspaceId: state.workspaceId, tileId: state.tileId }, "");
+  if (push) history.pushState({ level, machineId: currentId, workspaceId: state.workspaceId, tileId: state.tileId }, "");
 
   const origin = from?.getBoundingClientRect();
   draw();
   zoom(origin, depth(level) > depth(before));
   watch();
 
+  // An answer is kept only if the page is still looking at what it asked about, on the same computer —
+  // the same test a push passes.
+  const askedOf = currentId;
+  const stillWanted = (wantedLevel) => currentId === askedOf && state.level === wantedLevel;
   if (level === "layout" && !state.layout) ask({ type: "layout", workspaceId: state.workspaceId }).then((a) => {
-    if (a?.layout) { state.layout = a.layout; draw(); }
+    if (a?.layout && stillWanted("layout") && a.layout.workspaceId === state.workspaceId) { state.layout = a.layout; draw(); }
   });
   if (level === "tile" && !state.tile) ask({ type: "tile", tileId: state.tileId }).then((a) => {
-    if (a?.tile) { state.tile = a.tile; draw(); scrollToEnd(true); }
+    if (a?.tile && stillWanted("tile") && a.tile.tileId === state.tileId) { state.tile = a.tile; draw(); scrollToEnd(true); }
   });
 }
 
-const depth = (level) => ({ workspaces: 0, layout: 1, tile: 2 })[level] ?? 0;
+const depth = (level) => ({ computers: 0, workspaces: 1, layout: 2, tile: 3 })[level] ?? 1;
+
+/** Puts another computer on screen. The one left stops being asked for its layout and tiles — it goes on
+ *  telling the list of computers what it is doing. */
+function switchTo(id) {
+  const leaving = machines.get(currentId);
+  if (leaving?.connState === "connected") watchNothing(leaving);
+  currentId = id;
+  // Remembered only once paired: a pairing cut short by a reload must not be what the page opens on.
+  if (id && isPaired(id)) setLastMachine(id);
+  state.layout = null;
+  state.tile = null;
+  state.workspaceId = null;
+  state.tileId = null;
+  lastTileKey = lastDockKey = null;
+  wsQuery = "";
+  wsPage = null;
+}
+
+/** After the computer on screen is gone — logged out of, or a pairing that failed — the last paired one
+ *  takes its place, with nothing of the one that left carried over. */
+function putNextOnScreen() {
+  switchTo(knownMachines().at(-1)?.id ?? null);
+}
 
 addEventListener("popstate", (event) => {
-  const s = event.state ?? { level: "workspaces" };
-  go(s.level, { workspaceId: s.workspaceId ?? null, tileId: s.tileId ?? null }, false);
+  const s = event.state ?? { level: "computers" };
+  // An entry of a computer since logged out of names workspaces and tiles no other computer has.
+  if (s.machineId && !machines.has(s.machineId)) { go("computers", {}, false); return; }
+  go(s.level, { machineId: s.machineId, workspaceId: s.workspaceId ?? null, tileId: s.tileId ?? null }, false);
 });
 
 function up() {
-  if (state.level === "workspaces") return;
+  if (state.level === "computers") return;
   history.back();
 }
 
@@ -231,11 +370,25 @@ function draw() {
   document.body.dataset.level = state.level;
   document.body.dataset.conn = state.connState;
 
-  if (state.connState !== "connected" && state.connState !== "reconnecting") {
+  if (machines.size === 0) {
     fill(bar, h("div.title", h("span.name", "mTiles")));
+    fill(view, pairingScreen());
+    fill(dock);
+    lastTileKey = lastDockKey = null;
+    return;
+  }
+
+  if (state.level === "computers") {
+    drawComputers();
+    return;
+  }
+
+  if (state.connState !== "connected" && state.connState !== "reconnecting") {
+    header({ back: "All computers", title: state.machine?.name ?? "mTiles" });
     fill(view, statusScreen());
     fill(dock);
     lastTileKey = lastDockKey = null;
+    wsPage = null;
     return;
   }
 
@@ -248,8 +401,6 @@ function draw() {
 
 function statusScreen() {
   const screens = {
-    unpaired: ["Pair this phone with mTiles",
-      "On the computer, open mTiles and press the QR button beside Settings. Scan the code with this phone's camera."],
     connecting: ["Connecting…", "Reaching mTiles through the relay. This takes a few seconds."],
     refused: ["This phone is not paired any more",
       "It was unpaired on the computer, or the code had already been used. Scan a new code from mTiles."],
@@ -258,28 +409,122 @@ function statusScreen() {
     "app-old": ["mTiles on the computer needs updating", "This page speaks a newer protocol than that copy of mTiles. Update mTiles, then reload."],
   };
   const [title, text] = screens[state.connState] ?? screens.connecting;
-  const others = knownMachines().filter((m) => m.id !== state.machine?.id);
+  const m = state.machine;
 
   return h("section.status-screen",
     state.connState === "connecting" ? activityMark("working") : null,
     h("h1", title),
     h("p", text),
     state.connState === "failed"
-      ? h("button.primary", { onclick: () => connect(state.machine.id, null) }, "Try again") : null,
-    state.connState === "failed" && state.machine
-      ? h("button", { onclick: logOut }, "Log out") : null,
-    state.connState === "refused" && state.machine
-      ? h("button", { onclick: async () => { await forgetMachine(state.machine.id); location.reload(); } }, "Forget this computer") : null,
-    others.length ? h("div.others", h("p", "Other computers"), others.map((m) =>
-      h("button", { onclick: () => connect(m.id, null) }, m.name))) : null);
+      ? h("button.primary", { onclick: () => connect(m.id, null) }, "Try again") : null,
+    state.connState === "failed" || state.connState === "refused"
+      ? h("button", { onclick: () => logOut(m) }, "Log out of this computer") : null);
+}
+
+/** The first screen, and the one an unpaired phone stays on. */
+function pairingScreen() {
+  return h("section.status-screen",
+    h("h1", "Pair this phone with mTiles"),
+    h("p", "On the computer, open mTiles and press the QR button beside Settings. Scan the code with this phone's camera."),
+    pasteLinkForm());
+}
+
+/** The route for a phone that cannot open the camera's link here — a page added to the home screen
+ *  opens it in the browser instead. The link is the one under the QR code in mTiles. */
+function pasteLinkForm(onDone) {
+  const input = h("input.q-custom", {
+    type: "url", placeholder: "Or paste the pairing link", autocomplete: "off", spellcheck: false,
+    enterKeyHint: "go",
+  });
+  const pair = () => {
+    const invitation = parseInvitation(input.value.trim());
+    if (!invitation) { say("That is not a pairing link from mTiles.", "error"); return; }
+    onDone?.();
+    pairWith(invitation);
+  };
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); pair(); } });
+  return h("div.paste-link", input, h("button", { onclick: pair }, "Pair"));
+}
+
+/** Pairs with a computer from a code, and puts it on screen. */
+function pairWith(invitation) {
+  machineFor(invitation.id);
+  go("workspaces", { machineId: invitation.id });
+  connect(invitation.id, invitation.code);
 }
 
 function header({ back, title, sub, marks }) {
+  // Another computer waiting for you is said on every screen but the list that already says it, and
+  // leads there.
+  const elsewhere = state.level !== "computers" && elsewhereNeedsYou()
+    ? h("button.elsewhere", {
+      onclick: () => go("computers"), "aria-label": "Another computer needs you", title: "Another computer needs you",
+    }, activityMark("blocked"))
+    : null;
   fill(bar,
     back ? h("button.back", { onclick: up, "aria-label": back }, icon("back")) : null,
     h("div.title", h("span.name", title), sub ? h("span.sub", sub) : null),
+    elsewhere,
     marks ?? null,
-    state.connState === "reconnecting" ? h("span.conn", { title: "Reconnecting" }, activityMark("working")) : null);
+    state.level !== "computers" && state.connState === "reconnecting"
+      ? h("span.conn", { title: "Reconnecting" }, activityMark("working")) : null);
+}
+
+// computers
+
+function drawComputers() {
+  header({ title: "Computers" });
+
+  // In the order they were paired, never by urgency: a row that jumps while you reach for it is worse
+  // than one you have to look for, and the mark on it already says which one wants you.
+  // A pairing still under way — or one whose hello never came back — is not stored yet, and is listed
+  // after the stored ones so it can still be retried or logged out of.
+  const stored = knownMachines().map(({ id }) => machineFor(id));
+  const pending = [...machines.values()].filter((m) => !stored.includes(m));
+  const rows = [...stored, ...pending].map((m) => {
+    const attention = attentionOf(m);
+    const down = isDown(m);
+    return h("div.pc-row", { class: [isCurrent(m) && "current", down && "down", attention.blocked && "blocked"].filter(Boolean).join(" ") },
+      h("button.pc-open", {
+        onclick: (e) => {
+          if (down) connect(m.id, null);
+          go("workspaces", { machineId: m.id, from: e.currentTarget });
+        },
+      },
+        h("span.ws-text",
+          h("span.ws-name", m.name),
+          h("span.ws-meta", computerStatus(m))),
+        m.connState === "connecting" ? activityMark("working") : activityMark(attention.activity)),
+      h("button.pc-more", { onclick: () => computerSheet(m), "aria-label": `More for ${m.name}` }, icon("more")));
+  });
+
+  fill(view, h("div.pc-page",
+    h("nav.ws-list", rows),
+    h("button.pc-add", { onclick: addComputerSheet }, icon("plus"), "Add a computer")));
+  fill(dock);
+  lastDockKey = null;
+  wsPage = null;
+}
+
+function sheet(...children) {
+  root.querySelector(".sheet")?.remove();
+  const el = h("div.sheet", children, h("button.quiet", { onclick: () => el.remove() }, "Close"));
+  root.append(el);
+  return el;
+}
+
+function computerSheet(m) {
+  const el = sheet(
+    h("p.sheet-title", m.name),
+    isDown(m) ? h("button", { onclick: () => { el.remove(); connect(m.id, null); } }, "Connect again") : null,
+    h("button.danger", { onclick: () => { el.remove(); logOut(m); } }, "Log out of this computer"));
+}
+
+function addComputerSheet() {
+  const el = sheet(
+    h("p.sheet-title", "Add a computer"),
+    h("p.sheet-text", "On the other computer, open mTiles and press the QR button beside Settings. Scan the code with this phone's camera — it opens here, beside the computers already paired."),
+    pasteLinkForm(() => el.remove()));
 }
 
 // workspaces
@@ -288,13 +533,7 @@ let wsQuery = "";
 let wsPage = null;        // the filter and the list under it, kept so typing never rebuilds the field
 
 function drawWorkspaces() {
-  const machines = knownMachines();
-  header({
-    title: state.machine?.name ?? "mTiles",
-    sub: machines.length > 1 ? "tap to switch computer" : null,
-    marks: h("button.logout", { onclick: logOut, "aria-label": "Log out", title: "Log out" }, icon("logout")),
-  });
-  if (machines.length > 1) bar.querySelector(".title").addEventListener("click", chooseMachine);
+  header({ back: "All computers", title: state.machine?.name ?? "mTiles" });
 
   // Built once and refilled: a push arriving while somebody types must not take the keyboard away.
   if (!wsPage || !view.contains(wsPage.root)) {
@@ -343,41 +582,35 @@ function drawWorkspaceRows() {
  *  a workspace that is not loaded asks first, because opening it starts its shells and agents. */
 async function openWorkspace(ws, from) {
   if (!ws.loaded && !confirm(`Open ${ws.name} on the computer? mTiles switches to it and starts its tiles.`)) return;
+  const askedOf = currentId;
   if (!ws.current && !(await ask({ type: "open", workspaceId: ws.id }))) return;
+  // Switched to another computer while it was opening: this workspace is not one of that computer's.
+  if (currentId !== askedOf || state.level !== "workspaces") return;
   go("layout", { workspaceId: ws.id, from });
 }
 
 /**
- * Logs this phone out of the computer it is looking at: mTiles is asked to forget it — the same as
- * Unpair in its panel — and this browser forgets the pairing. Pairing again needs a new code.
- * With the computer out of reach only the phone's half can be done; the row it leaves in mTiles' panel
- * opens nothing without this phone's key, and Unpair there removes it.
+ * Logs this phone out of one computer: mTiles is asked to forget it — the same as Unpair in its panel —
+ * and this browser forgets the pairing. Pairing again needs a new code. With the computer out of reach
+ * only the phone's half can be done; the row it leaves in mTiles' panel opens nothing without this
+ * phone's key, and Unpair there removes it.
  */
-async function logOut() {
-  const machine = state.machine;
-  if (!machine) return;
-  if (!confirm(`Log out of ${machine.name}? Pairing this phone again needs a new code from mTiles.`)) return;
+async function logOut(m) {
+  if (!m) return;
+  if (!confirm(`Log out of ${m.name}? Pairing this phone again needs a new code from mTiles.`)) return;
 
-  if (state.connState === "connected" || state.connState === "reconnecting") {
-    try { await state.conn.request({ type: "unpair" }); } catch { /* forgotten here all the same */ }
+  const conn = m.conn;
+  m.conn = null;
+  if (conn && isUp(m)) {
+    try { await conn.request({ type: "unpair" }); } catch { /* forgotten here all the same */ }
   }
-  await state.conn?.close();
-  state.conn = null;
-  await forgetMachine(machine.id);
-  // Starting over picks another paired computer, or shows how to pair one.
-  location.replace(location.pathname + location.search);
-}
+  await conn?.close();
+  await forgetMachine(m.id);
+  machines.delete(m.id);
 
-function chooseMachine() {
-  const machines = knownMachines();
-  const sheet = h("div.sheet",
-    h("p.sheet-title", "Computers paired with this phone"),
-    machines.map((m) => h("button", {
-      class: m.id === state.machine?.id ? "current" : "",
-      onclick: () => { sheet.remove(); connect(m.id, null); },
-    }, m.name)),
-    h("button.quiet", { onclick: () => sheet.remove() }, "Close"));
-  root.append(sheet);
+  if (isCurrent(m)) putNextOnScreen();
+  say(`Logged out of ${m.name}.`);
+  go("computers");
 }
 
 // layout
@@ -390,9 +623,10 @@ function drawLayout() {
   if (!layout) { fill(view, h("p.empty", "Loading the layout…")); fill(dock); return; }
   if (!layout.root) { fill(view, h("p.empty", "This workspace has no tiles.")); fill(dock); return; }
 
-  const box = view.getBoundingClientRect();
+  // clientWidth, not getBoundingClientRect: the zoom animates the view with a transform, and a layout
+  // that arrives mid-zoom was measured at the animation's scale — a miniature drawn at half size.
   const pad = 8;
-  const rects = layoutRects(layout.root, { x: 0, y: 0, w: box.width - pad * 2, h: box.height - pad * 2 }, 8);
+  const rects = layoutRects(layout.root, { x: 0, y: 0, w: view.clientWidth - pad * 2, h: view.clientHeight - pad * 2 }, 8);
 
   if (isLegible(rects)) {
     const canvas = h("div.miniature");
@@ -740,5 +974,12 @@ if (vv) {
   fit();
 }
 
-history.replaceState({ level: "workspaces" }, "");
+// A pairing link opened in the page already running — pasted into its address bar — changes only the
+// fragment, which reloads nothing.
+addEventListener("hashchange", () => {
+  const invitation = takeInvitationFromUrl();
+  if (invitation) pairWith(invitation);
+});
+
+history.replaceState({ level: "computers" }, "");
 start();
