@@ -66,6 +66,15 @@ public sealed class PhoneBridgeManager : IAsyncDisposable
     // a machine that woke before its Wi-Fi would otherwise stay unreachable to its phone until restarted.
     private Timer? _retryTimer;
     private int _pushing;
+
+    /// <summary>A sampling was asked for while one was running, so another is owed as soon as it ends —
+    /// a phone that asked to watch a tile must not wait for the timer, which the tests do not run.</summary>
+    private int _pushRequested;
+
+    /// <summary>A sampling had to leave a phone out because its previous messages were still on their way;
+    /// another is owed when those arrive. Separate from <see cref="_pushRequested"/>, which is repaid at
+    /// once: repaying this one at once would only leave the same phone out again, as fast as it could.</summary>
+    private int _pushOwedAfterSend;
     private long _tick;
 
     /// <summary>The phones whose previous messages are still on their way; each is left out of a sampling
@@ -606,11 +615,20 @@ public sealed class PhoneBridgeManager : IAsyncDisposable
     internal async Task PushNowAsync()
     {
         if (_disposed || _host is not { } host) return;
-        if (Interlocked.Exchange(ref _pushing, 1) == 1) return;
+        if (Interlocked.Exchange(ref _pushing, 1) == 1)
+        {
+            Volatile.Write(ref _pushRequested, 1);
+            return;
+        }
 
         try
         {
-            var connected = host.Peers.Where(p => p.IsConnected && !_sending.ContainsKey(p.Key)).ToList();
+            // This round covers everything asked for up to now.
+            Volatile.Write(ref _pushRequested, 0);
+
+            var up = host.Peers.Where(p => p.IsConnected).ToList();
+            var connected = up.Where(p => !_sending.ContainsKey(p.Key)).ToList();
+            if (connected.Count < up.Count) Volatile.Write(ref _pushOwedAfterSend, 1);
             if (connected.Count == 0) return;
 
             var tick = Interlocked.Increment(ref _tick);
@@ -633,6 +651,9 @@ public sealed class PhoneBridgeManager : IAsyncDisposable
         {
             Volatile.Write(ref _pushing, 0);
         }
+
+        if (Interlocked.Exchange(ref _pushRequested, 0) == 1)
+            _ = PushNowAsync();
     }
 
     private async Task SendInOrderAsync(ILinkPeer peer, IReadOnlyList<byte[]> messages)
@@ -657,6 +678,10 @@ public sealed class PhoneBridgeManager : IAsyncDisposable
         finally
         {
             _sending.TryRemove(peer.Key, out _);
+            // A sampling that left this phone out — a watch it asked for meanwhile, a change in the tile —
+            // is owed now rather than at the next tick.
+            if (Interlocked.Exchange(ref _pushOwedAfterSend, 0) == 1)
+                _ = PushNowAsync();
         }
     }
 

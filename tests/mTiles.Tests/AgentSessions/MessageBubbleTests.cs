@@ -83,9 +83,21 @@ public class MessageBubbleTests
     }
 
     /// <summary>The block a message of the user's is drawn in.</summary>
-    /// <remarks>Asked for by its class rather than by the control inside it: what draws the text is the
-    /// markdown view both sides of the conversation now share, and its innards are its own business.
-    /// </remarks>
-    private static Border Bubble(Control view) =>
-        view.GetVisualDescendants().OfType<Border>().Single(b => b.Classes.Contains("row-user"));
+    /// <remarks><para>Asked for by its class rather than by the control inside it: what draws the text is the
+    /// markdown view both sides of the conversation now share, and its innards are its own business.</para>
+    /// <para>Settled again, a bounded number of times, until the list has made a container for the
+    /// message: on a loaded Linux runner one pass has returned before it had (CI, twice), and the test then
+    /// failed on finding nothing rather than on anything about wrapping. Passes, never a clock — nothing
+    /// here waits on time.</para></remarks>
+    private static Border Bubble(Control view)
+    {
+        for (var pass = 0; pass < 20; pass++)
+        {
+            if (view.GetVisualDescendants().OfType<Border>().SingleOrDefault(b => b.Classes.Contains("row-user"))
+                is { } bubble)
+                return bubble;
+            if (TopLevel.GetTopLevel(view) is Window window) Settle(window);
+        }
+        throw new Xunit.Sdk.XunitException("the message was never drawn: no bubble after twenty layout passes");
+    }
 }
