@@ -89,6 +89,10 @@ button.quiet { background: none; border-color: transparent; color: var(--muted);
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 #app {
+  /* Fixed, and sized to the visual viewport from app.js: with the keyboard up the page is what is left
+     above it, dock included, rather than a page the keyboard is laid over. */
+  position: fixed;
+  top: 0; left: 0; right: 0;
   display: grid;
   grid-template-rows: auto 1fr auto;
   height: 100dvh;
@@ -105,6 +109,7 @@ button.quiet { background: none; border-color: transparent; color: var(--muted);
   min-height: 52px;
 }
 .bar .back { min-height: 36px; width: 36px; padding: 0; display: grid; place-items: center; background: none; border-color: transparent; }
+.bar .logout { min-height: 36px; width: 36px; padding: 0; display: grid; place-items: center; background: none; border-color: transparent; color: var(--muted); }
 .bar .title { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .bar .name { font-size: var(--fs-lg); font-weight: 700; color: var(--strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bar .sub { font-size: var(--fs-xs); color: var(--muted); white-space: pre; overflow: hidden; text-overflow: ellipsis; }
@@ -138,7 +143,19 @@ button.quiet { background: none; border-color: transparent; color: var(--muted);
 
 /* workspaces: rows, one height, one left edge */
 
+.ws-filter {
+  position: sticky; top: 0; z-index: 1;
+  width: 100%; margin: 0 0 6px;
+  background: var(--surface);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-control);
+  padding: 9px 12px;
+  box-shadow: 0 -8px 0 var(--canvas);
+}
+.ws-filter[hidden] { display: none; }
 .ws-list { display: grid; gap: 2px; }
+.ws-pin { flex: none; display: grid; place-items: center; color: var(--k-usage); }
+.ws-pin .icon { width: 16px; height: 16px; fill: currentColor; }
 .ws-row {
   display: flex; align-items: center; gap: 12px;
   text-align: left; width: 100%;
@@ -157,7 +174,7 @@ button.quiet { background: none; border-color: transparent; color: var(--muted);
 .miniature { position: absolute; inset: var(--gap); }
 .tile-card {
   position: absolute;
-  display: flex; flex-direction: column; justify-content: space-between;
+  display: flex; flex-direction: column; justify-content: flex-start;
   text-align: left; overflow: hidden;
   background: var(--base);
   border: 1px solid var(--hair);
@@ -165,13 +182,31 @@ button.quiet { background: none; border-color: transparent; color: var(--muted);
   padding: 10px;
 }
 .tile-card.active { border-color: var(--accent-line); background: var(--raised); }
+.tile-card.working { border-color: color-mix(in srgb, var(--accent-ink) 30%, var(--hair)); }
 .tile-card.blocked { border-color: color-mix(in srgb, var(--danger) 55%, var(--hair)); }
 .tile-card.unreachable { background: var(--surface); opacity: .5; }
-.tile-card.row { position: static; width: 100%; min-height: 64px; margin-bottom: var(--gap); }
+.tile-card.row { position: relative; width: 100%; min-height: 64px; margin-bottom: var(--gap); }
 .tile-list { display: grid; }
 .tile-head { display: flex; align-items: center; gap: 6px; }
 .tile-kind { font-size: var(--fs-xs); color: var(--muted); }
-.tile-name { color: var(--strong); font-weight: 700; overflow-wrap: anywhere; }
+.tile-name { margin-top: auto; flex: none; color: var(--strong); font-weight: 700; overflow-wrap: anywhere; }
+.tile-age { margin-left: auto; font-size: var(--fs-xs); color: var(--muted); }
+/* What the tile is doing, between its kind and its name: the part of the card that was empty. It gives way
+   first — clamped, and allowed to shrink to nothing on a card too short for it. */
+.tile-preview {
+  flex: 0 1 auto; min-height: 0; margin: 6px 0;
+  font-size: var(--fs-xs); line-height: 1.4; color: var(--body);
+  overflow: hidden; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 6;
+}
+.tile-card.blocked .tile-preview { color: var(--danger); }
+.tile-card.row .tile-preview { -webkit-line-clamp: 2; }
+.tile-context {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
+  background: linear-gradient(to right, var(--accent) var(--used), transparent var(--used));
+  opacity: .8;
+}
+.tile-context.high { background: linear-gradient(to right, var(--warn) var(--used), transparent var(--used)); }
 
 .tile-card[title] .tile-kind { color: var(--muted); }
 .tile-card:not(.unreachable) .tile-kind { color: var(--kind, var(--muted)); }

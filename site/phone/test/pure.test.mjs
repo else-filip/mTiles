@@ -68,3 +68,30 @@ test("a layout of stamps is not legible", () => {
   assert.equal(isLegible(rects), false);
   assert.equal(isLegible([{ w: 60, h: 60 }]), true);
 });
+
+import { orderWorkspaces, matchesQuery } from "../workspaces.js";
+
+test("pinned workspaces come first, the rest keep the order they were sent in", () => {
+  const list = [{ name: "a" }, { name: "b", favorite: true }, { name: "c" }, { name: "d", favorite: true }];
+  assert.deepEqual(orderWorkspaces(list).map((w) => w.name), ["b", "d", "a", "c"]);
+});
+
+test("the filter wants every word, anywhere, in any order, over the name and the branch", () => {
+  const ws = { name: "mterminal", branch: "feat/phone-relay" };
+  assert.equal(matchesQuery(ws, ""), true);
+  assert.equal(matchesQuery(ws, "relay mterm"), true);
+  assert.equal(matchesQuery(ws, "MTERMINAL"), true);
+  assert.equal(matchesQuery(ws, "mterminal main"), false);
+  assert.equal(matchesQuery({ name: "x", branch: null }, "x"), true);
+});
+
+import { ago } from "../format.js";
+
+test("how long ago is said in one unit, and not at all under a minute", () => {
+  assert.equal(ago(null), "");
+  assert.equal(ago(59_000), "");
+  assert.equal(ago(60_000), "1m");
+  assert.equal(ago(59 * 60_000), "59m");
+  assert.equal(ago(3 * 3_600_000 + 5), "3h");
+  assert.equal(ago(50 * 3_600_000), "2d");
+});

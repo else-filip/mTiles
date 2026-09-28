@@ -12,6 +12,8 @@ import { parse, render } from "./markdown.js";
 import { layoutRects, isLegible, readingOrder } from "./geometry.js";
 import { Connection, knownMachines, lastMachineId, takeInvitationFromUrl, forgetMachine, PROTOCOL } from "./connection.js";
 import { Dictation } from "./dictation.js";
+import { ago } from "./format.js";
+import { orderWorkspaces, matchesQuery, FILTER_THRESHOLD } from "./workspaces.js";
 
 const KINDS = {
   terminal: "Terminal", agent: "Terminal agent", "agent-conversation": "Agent", goal: "Goal",
@@ -42,6 +44,7 @@ const state = {
   answers: {},            // pendingId -> { questionId -> [labels] }
   answerChips: 0,         // moves when a chip is toggled — typing does not redraw, or the field loses focus
   sending: false,
+  clockOffset: 0,         // mTiles' clock less this phone's, from the hello — cards' times are mTiles'
 };
 
 const root = document.getElementById("app");
@@ -90,6 +93,7 @@ async function connect(id, code) {
       return;
     }
     state.session = state.hello.session ?? null;
+    state.clockOffset = typeof state.hello.now === "number" ? state.hello.now - Date.now() : 0;
     const { workspaces } = await conn.request({ type: "workspaces" });
     state.workspaces = workspaces;
     state.connState = "connected";
@@ -262,6 +266,8 @@ function statusScreen() {
     h("p", text),
     state.connState === "failed"
       ? h("button.primary", { onclick: () => connect(state.machine.id, null) }, "Try again") : null,
+    state.connState === "failed" && state.machine
+      ? h("button", { onclick: logOut }, "Log out") : null,
     state.connState === "refused" && state.machine
       ? h("button", { onclick: async () => { await forgetMachine(state.machine.id); location.reload(); } }, "Forget this computer") : null,
     others.length ? h("div.others", h("p", "Other computers"), others.map((m) =>
@@ -278,15 +284,43 @@ function header({ back, title, sub, marks }) {
 
 // workspaces
 
+let wsQuery = "";
+let wsPage = null;        // the filter and the list under it, kept so typing never rebuilds the field
+
 function drawWorkspaces() {
   const machines = knownMachines();
   header({
     title: state.machine?.name ?? "mTiles",
     sub: machines.length > 1 ? "tap to switch computer" : null,
+    marks: h("button.logout", { onclick: logOut, "aria-label": "Log out", title: "Log out" }, icon("logout")),
   });
   if (machines.length > 1) bar.querySelector(".title").addEventListener("click", chooseMachine);
 
-  const rows = state.workspaces.map((ws) =>
+  // Built once and refilled: a push arriving while somebody types must not take the keyboard away.
+  if (!wsPage || !view.contains(wsPage.root)) {
+    const input = h("input.ws-filter", {
+      type: "search", placeholder: "Filter workspaces", autocomplete: "off", spellcheck: false,
+      enterKeyHint: "search", value: wsQuery,
+      oninput: (e) => { wsQuery = e.target.value; drawWorkspaceRows(); },
+    });
+    const list = h("nav.ws-list");
+    wsPage = { root: h("div.ws-page", input, list), input, list };
+    fill(view, wsPage.root);
+  }
+
+  const showFilter = state.workspaces.length > FILTER_THRESHOLD;
+  wsPage.input.hidden = !showFilter;
+  if (!showFilter && wsQuery) { wsQuery = ""; wsPage.input.value = ""; }
+  drawWorkspaceRows();
+  fill(dock);
+  lastDockKey = null;
+}
+
+function drawWorkspaceRows() {
+  const all = orderWorkspaces(state.workspaces);
+  const shown = all.filter((ws) => matchesQuery(ws, wsQuery));
+
+  const rows = shown.map((ws) =>
     h("button.ws-row", {
       class: [ws.current && "current", !ws.loaded && "unloaded"].filter(Boolean).join(" "),
       onclick: (e) => openWorkspace(ws, e.currentTarget),
@@ -294,19 +328,44 @@ function drawWorkspaces() {
       h("span.ws-text",
         h("span.ws-name", ws.name),
         h("span.ws-meta", ws.branch ?? (ws.loaded ? "" : "not open"))),
-      activityMark(ws.activity)));
+      activityMark(ws.activity),
+      ws.favorite ? h("span.ws-pin", { title: "Pinned" }, icon("star")) : null));
 
-  fill(view, rows.length ? h("nav.ws-list", rows) : h("p.empty", "mTiles has no workspaces yet."));
-  fill(dock);
-  lastDockKey = null;
+  // A filter that leaves nothing says so: a list that empties itself reads as workspaces that have gone.
+  fill(wsPage.list,
+    all.length === 0 ? h("p.empty", "mTiles has no workspaces yet.")
+      : rows.length === 0 ? h("p.empty", `No workspace matches “${wsQuery.trim()}”.`)
+        : rows);
 }
 
+/** Opening a workspace here opens it on the computer too: the phone is a remote for that screen, and
+ *  the two showing different workspaces would leave dictation and the active tile aimed elsewhere. Only
+ *  a workspace that is not loaded asks first, because opening it starts its shells and agents. */
 async function openWorkspace(ws, from) {
-  if (!ws.loaded) {
-    if (!confirm(`Open ${ws.name} on the computer? mTiles switches to it and starts its tiles.`)) return;
-    if (!(await ask({ type: "open", workspaceId: ws.id }))) return;
-  }
+  if (!ws.loaded && !confirm(`Open ${ws.name} on the computer? mTiles switches to it and starts its tiles.`)) return;
+  if (!ws.current && !(await ask({ type: "open", workspaceId: ws.id }))) return;
   go("layout", { workspaceId: ws.id, from });
+}
+
+/**
+ * Logs this phone out of the computer it is looking at: mTiles is asked to forget it — the same as
+ * Unpair in its panel — and this browser forgets the pairing. Pairing again needs a new code.
+ * With the computer out of reach only the phone's half can be done; the row it leaves in mTiles' panel
+ * opens nothing without this phone's key, and Unpair there removes it.
+ */
+async function logOut() {
+  const machine = state.machine;
+  if (!machine) return;
+  if (!confirm(`Log out of ${machine.name}? Pairing this phone again needs a new code from mTiles.`)) return;
+
+  if (state.connState === "connected" || state.connState === "reconnecting") {
+    try { await state.conn.request({ type: "unpair" }); } catch { /* forgotten here all the same */ }
+  }
+  await state.conn?.close();
+  state.conn = null;
+  await forgetMachine(machine.id);
+  // Starting over picks another paired computer, or shows how to pair one.
+  location.replace(location.pathname + location.search);
 }
 
 function chooseMachine() {
@@ -351,8 +410,15 @@ function drawLayout() {
 }
 
 function tileCard(leaf, row = false) {
+  const preview = leaf.preview;
   const classes = ["tile-card", row && "row", leaf.active && "active", !leaf.reachable && "unreachable",
-    leaf.activity === "blocked" && "blocked"].filter(Boolean).join(" ");
+    leaf.activity === "blocked" && "blocked", leaf.activity === "working" && "working"].filter(Boolean).join(" ");
+
+  // How long it has been quiet: said only of a tile that is not working, since the arc says the rest.
+  const since = preview?.changedAt != null && leaf.activity !== "working"
+    ? ago(Date.now() + state.clockOffset - preview.changedAt) : "";
+  const context = preview?.contextPercent;
+
   return h("button", {
     class: classes,
     style: { "--kind": `var(--k-${KIND_ACCENT[leaf.kind] ?? "terminal"})` },
@@ -360,8 +426,15 @@ function tileCard(leaf, row = false) {
     title: leaf.reachable ? leaf.name : `${leaf.name} — not available from a phone`,
     onclick: (e) => go("tile", { tileId: leaf.tileId, from: e.currentTarget }),
   },
-    h("span.tile-head", activityMark(leaf.activity), h("span.tile-kind", KINDS[leaf.kind] ?? leaf.kind)),
-    h("span.tile-name", leaf.name));
+    h("span.tile-head", activityMark(leaf.activity), h("span.tile-kind", KINDS[leaf.kind] ?? leaf.kind),
+      since ? h("span.tile-age", { title: "since it last did something" }, since) : null),
+    preview?.text ? h("span.tile-preview", preview.text) : null,
+    h("span.tile-name", leaf.name),
+    context != null ? h("span.tile-context", {
+      class: context >= 80 ? "high" : "",
+      title: `${Math.round(context)}% of the context used`,
+      style: { "--used": `${Math.max(0, Math.min(100, context))}%` },
+    }) : null);
 }
 
 // tile
@@ -646,6 +719,26 @@ function say(message, tone = "info") {
 }
 
 addEventListener("resize", () => { if (state.level === "layout") draw(); });
+
+// The cards' "3m" moves with the clock, not only with pushes.
+setInterval(() => { if (state.level === "layout" && !document.hidden) draw(); }, 30_000);
+
+// The keyboard. Not every browser honours `interactive-widget=resizes-content` — some lay the keyboard
+// over the page and shrink only the visual viewport, which left the dock under it. So the page is held
+// to the visual viewport itself: as tall as what is visible, and moved down by however far the browser
+// scrolled the layout to keep the caret in view.
+const vv = window.visualViewport;
+if (vv) {
+  const fit = () => {
+    const atEnd = state.level === "tile" && isAtEnd();
+    root.style.height = `${vv.height}px`;
+    root.style.transform = vv.offsetTop > 0 ? `translateY(${vv.offsetTop}px)` : "";
+    if (atEnd) scrollToEnd(true);
+  };
+  vv.addEventListener("resize", fit);
+  vv.addEventListener("scroll", fit);
+  fit();
+}
 
 history.replaceState({ level: "workspaces" }, "");
 start();
