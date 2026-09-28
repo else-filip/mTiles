@@ -77,11 +77,12 @@ public partial class App : Application
         // workspace currently loaded and reacts to the global switch in Settings.
         _agentFileSync = new AgentFileSyncCoordinator(_settingsService);
 
-        // Captured before the view model exists, and read only when a phone actually streams — which
+        // Captured before the view model exists, and read only when a phone asks for something — which
         // breaks the circle between the two without either of them holding a half-built reference.
         MainWindowViewModel? mainVmRef = null;
+        PhoneBridgeManager.ForgetKestrelLeftovers();
         _phoneBridge = new PhoneBridgeManager(_settingsService, _dictation, router,
-            () => mainVmRef?.ActiveTile);
+            new MainWindowPhoneWorkspaces(() => mainVmRef));
 
         var mainVm = new MainWindowViewModel(workspaceService, persistenceService, _settingsService,
             BuildTileCatalog(_dbManager, _usage,
@@ -92,15 +93,9 @@ public partial class App : Application
             windowCatalog: panel => BuildWindowTileCatalog(_usage, panel));
         mainVmRef = mainVm;
 
-        // The other half of the Func above: it says what the active tile is, this says when to look
-        // again. Wired here because this is where the bridge is given its view of the view model tree —
-        // the manager keeps no reference to it, and the view models keep none to the bridge.
-        mainVm.ActiveTileChanged += _phoneBridge.NotifyActiveTileChanged;
-
-        // Asked for explicitly, so a phone paired yesterday can reconnect without the panel being opened
-        // first. Off by default: this is the one server here that listens to the network. The condition
-        // lives on the manager so this and "may it stop now" cannot drift apart — it takes dictation into
-        // account too, because a bridge nothing can dictate through is a listening socket and nothing else.
+        // So a paired phone can reach this machine without the panel being opened first. A machine that
+        // has never paired one, and was not asked to stay connected, never dials the relay. The condition
+        // lives on the manager so this and "may it stop now" cannot drift apart.
         if (_phoneBridge.ShouldKeepRunning)
             _ = _phoneBridge.StartAsync();
 

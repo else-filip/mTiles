@@ -6,30 +6,6 @@
              x:DataType="vm:PhoneBridgeViewModel">
 
     <UserControl.Styles>
-        <!-- The two scan targets. Everything they do not share lives inside them; everything they do
-             share was moved out, because two cards carrying the same three sentences read as one thing —
-             and picking the wrong one is the failure this panel exists to prevent. -->
-        <!-- A card, at the radius every other card in the application uses. It was RadiusLg here and
-             RadiusTile everywhere else, which is two answers to one question. The clip is on this
-             border and it also draws the outline — safe only because this one is a fixed size inside a
-             window, not laid out at a fractional scale against a window edge; see the tile card for
-             what that costs when it is not. -->
-        <Style Selector="Border.code-card">
-            <Setter Property="Background" Value="{DynamicResource BgSurface}" />
-            <Setter Property="BorderBrush" Value="{DynamicResource BorderSubtle}" />
-            <Setter Property="BorderThickness" Value="{DynamicResource BorderThin}" />
-            <Setter Property="CornerRadius" Value="{DynamicResource RadiusTile}" />
-            <Setter Property="ClipToBounds" Value="True" />
-        </Style>
-
-        <Style Selector="TextBlock.card-title">
-            <Setter Property="FontFamily" Value="{DynamicResource UiFontFamily}" />
-            <Setter Property="FontSize" Value="{DynamicResource FontLg}" />
-            <Setter Property="FontWeight" Value="SemiBold" />
-            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
-            <Setter Property="VerticalAlignment" Value="Center" />
-        </Style>
-
         <Style Selector="TextBlock.note">
             <Setter Property="FontSize" Value="{DynamicResource FontXs}" />
             <Setter Property="Foreground" Value="{DynamicResource TextMuted}" />
@@ -43,7 +19,7 @@
 
             <!-- Header -->
             <StackPanel DockPanel.Dock="Top" Spacing="3">
-                <TextBlock Text="Dictate from a phone"
+                <TextBlock Text="Pair a phone"
                            FontFamily="{DynamicResource UiFontFamily}"
                            FontSize="{DynamicResource FontLg}"
                            FontWeight="SemiBold"
@@ -53,29 +29,15 @@
                            FontSize="{DynamicResource FontSm}"
                            Foreground="{DynamicResource TextMuted}"
                            TextWrapping="Wrap" />
-                <TextBlock Text="Scan a code with your phone, then hold the button on the page that opens and speak. What you say is typed into whichever tile is active, exactly as the Alt+Space shortcut does. Recognition still runs on this computer."
-                           Classes="note"
-                           MaxWidth="640"
-                           HorizontalAlignment="Left"
-                           Margin="0,5,0,0" />
             </StackPanel>
 
             <!-- Footer -->
             <DockPanel DockPanel.Dock="Bottom" Margin="0,16,0,0">
                 <Button DockPanel.Dock="Left"
                         Classes="outlined-sm on-elevated"
-                        Content="Look again"
-                        ToolTip.Tip="Re-check this machine's network addresses"
-                        Command="{Binding RefreshCommand}" />
-                <Button DockPanel.Dock="Left"
-                        Classes="outlined-sm on-elevated"
-                        Margin="6,0,0,0"
-                        Content="Different network?"
-                        Command="{Binding ToggleAlternativesCommand}"
-                        IsVisible="{Binding Alternatives.Count}" />
-                <!-- Classes="accent", not eight properties restating it. Restated, it had the theme's
-                     own foreground on the accent — grey on blue — which is exactly what the class
-                     exists to get right. -->
+                        Content="New code"
+                        ToolTip.Tip="Withdraw this code and show a fresh one"
+                        Command="{Binding RenewCommand}" />
                 <Button x:Name="CloseButton"
                         Classes="accent"
                         HorizontalAlignment="Right"
@@ -102,245 +64,82 @@
                                    TextWrapping="Wrap" />
                     </Border>
 
-                    <!-- Paired devices: the confirmation that a phone got through. -->
-                    <ItemsControl ItemsSource="{Binding Devices}">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate DataType="vm:PhoneDeviceViewModel">
-                                <Border Background="{DynamicResource StatusSuccessSubtle}"
-                                        CornerRadius="{DynamicResource RadiusMd}"
-                                        Padding="12,8" Margin="0,0,0,6">
-                                    <DockPanel>
-                                        <Button DockPanel.Dock="Right"
-                                                Classes="tile-btn-close"
-                                                ToolTip.Tip="Disconnect this device"
-                                                Command="{Binding RevokeCommand}">
-                                            <mi:MaterialIcon Kind="Close" Width="14" Height="14" />
-                                        </Button>
-                                        <mi:MaterialIcon Kind="Cellphone" Width="16" Height="16"
-                                                         Margin="0,0,8,0"
-                                                         Foreground="{DynamicResource StatusSuccessText}"
-                                                         VerticalAlignment="Center" />
-                                        <TextBlock Text="{Binding Label}"
-                                                   Foreground="{DynamicResource TextPrimary}"
-                                                   FontSize="{DynamicResource FontSm}"
-                                                   VerticalAlignment="Center" />
-                                        <TextBlock Text="{Binding Since}" Margin="8,0,0,0"
-                                                   Foreground="{DynamicResource TextMuted}"
-                                                   FontSize="{DynamicResource FontXs}"
-                                                   VerticalAlignment="Center" />
-                                    </DockPanel>
-                                </Border>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
+                    <!-- The code. A DockPanel so the code keeps its natural size and the words take what
+                         is left. Interpolation off: a QR code is a grid of hard pixels, and smoothing it is
+                         what makes a small one fail to scan. -->
+                    <DockPanel IsVisible="{Binding HasCode}">
+                        <Border DockPanel.Dock="Left"
+                                Background="White"
+                                Padding="8"
+                                CornerRadius="{DynamicResource RadiusSm}"
+                                VerticalAlignment="Top">
+                            <Image Source="{Binding QrImage}"
+                                   Width="232" Height="232"
+                                   RenderOptions.BitmapInterpolationMode="None" />
+                        </Border>
 
-                    <!-- The codes: two to a row, and mirrored outward. -->
-                    <ItemsControl ItemsSource="{Binding Codes}">
-                        <ItemsControl.ItemsPanel>
-                            <ItemsPanelTemplate>
-                                <UniformGrid Columns="2" />
-                            </ItemsPanelTemplate>
-                        </ItemsControl.ItemsPanel>
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate DataType="vm:PhoneCodeViewModel">
-                                <Border Classes="code-card" Margin="0,0,10,10">
-                                    <StackPanel>
-                                        <!-- The icon leads. A Wi-Fi mark against a globe is settled in a
-                                             glance, where two headings sharing their first two words have
-                                             to be read — and reading is what you cannot do with a phone
-                                             held up to the screen. -->
-                                        <Border Background="{DynamicResource BgElevated}" Padding="14,10">
-                                            <StackPanel Orientation="Horizontal" Spacing="9">
-                                                <mi:MaterialIcon Kind="Wifi" Width="20" Height="20"
-                                                                 VerticalAlignment="Center"
-                                                                 IsVisible="{Binding !IsRemote}"
-                                                                 Foreground="{DynamicResource AccentHover}" />
-                                                <mi:MaterialIcon Kind="Earth" Width="20" Height="20"
-                                                                 VerticalAlignment="Center"
-                                                                 IsVisible="{Binding IsRemote}"
-                                                                 Foreground="{DynamicResource AccentHover}" />
-                                                <TextBlock Text="{Binding Title}" Classes="card-title" />
-                                            </StackPanel>
-                                        </Border>
-
-                                        <!-- A DockPanel, not a Grid: the code has a natural size and the
-                                             text takes whatever is left, whichever side each is on.
-                                             Swapping grid columns while their widths stayed put left the
-                                             starred column collapsed and the code hanging off the card. -->
-                                        <DockPanel Margin="14,12" LastChildFill="True">
-                                            <!-- Interpolation off: a QR code is a grid of hard pixels,
-                                                 and smoothing it is what makes a small one fail to scan. -->
-                                            <Border DockPanel.Dock="{Binding CodeDock}"
-                                                    Margin="{Binding CodeMargin}"
-                                                    Background="White"
-                                                    Padding="7"
-                                                    CornerRadius="{DynamicResource RadiusSm}"
-                                                    VerticalAlignment="Top">
-                                                <Image Source="{Binding Image}"
-                                                       Width="184" Height="184"
-                                                       RenderOptions.BitmapInterpolationMode="None" />
-                                            </Border>
-
-                                            <StackPanel Spacing="8" VerticalAlignment="Top">
-                                                <SelectableTextBlock Text="{Binding Host}"
-                                                           FontFamily="{DynamicResource TerminalFontFamily}"
-                                                           FontSize="{DynamicResource FontSm}"
-                                                           Foreground="{DynamicResource TextSecondary}"
-                                                           TextWrapping="Wrap" />
-                                                <TextBlock Text="{Binding Reason}" Classes="note" />
-
-                                                <StackPanel Orientation="Horizontal" Spacing="5"
-                                                            IsVisible="{Binding WarnsAboutCertificate}">
-                                                    <!-- The icon carries the colour, the sentence does
-                                                         not. This is the expected state for a private
-                                                         address, it is explained two paragraphs below,
-                                                         and both cards show it — a whole line in the
-                                                         error colour on every card is the palette's
-                                                         loudest thing spent on the normal case. -->
-                                                    <mi:MaterialIcon Kind="ShieldAlertOutline"
-                                                                     Width="13" Height="13"
-                                                                     VerticalAlignment="Top"
-                                                                     Margin="0,1,0,0"
-                                                                     Foreground="{DynamicResource GoalPhasePlan}" />
-                                                    <TextBlock Text="Asks you to accept a warning"
-                                                               FontSize="{DynamicResource FontXs}"
-                                                               Foreground="{DynamicResource TextSecondary}"
-                                                               TextWrapping="Wrap" />
-                                                </StackPanel>
-                                                <StackPanel Orientation="Horizontal" Spacing="5"
-                                                            IsVisible="{Binding IsTrusted}">
-                                                    <mi:MaterialIcon Kind="ShieldCheckOutline"
-                                                                     Width="13" Height="13"
-                                                                     VerticalAlignment="Top"
-                                                                     Margin="0,1,0,0"
-                                                                     Foreground="{DynamicResource StatusSuccessText}" />
-                                                    <TextBlock Text="Opens with no warning"
-                                                               FontSize="{DynamicResource FontXs}"
-                                                               Foreground="{DynamicResource TextSecondary}"
-                                                               TextWrapping="Wrap" />
-                                                </StackPanel>
-
-                                                <Button Classes="outlined-sm"
-                                                        HorizontalAlignment="Left"
-                                                        Content="Copy link"
-                                                        Margin="0,2,0,0"
-                                                        Command="{Binding CopyLinkCommand}"
-                                                        ToolTip.Tip="{Binding Url}" />
-                                            </StackPanel>
-                                        </DockPanel>
-                                    </StackPanel>
-                                </Border>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-
-                    <!-- Said once, for both cards. -->
-                    <TextBlock IsVisible="{Binding ShowCertificateNote}"
-                               Classes="note"
-                               Text="A code marked with a shield asks your phone to accept a security warning. That is expected — mTiles signed that certificate itself, because no public authority will certify a private address. Accept it once and the microphone works from then on." />
-
-                    <TextBlock IsVisible="{Binding HasPortNotice}"
-                               Classes="note"
-                               Text="{Binding PortNotice}" />
-
-                    <!-- Read from the machine, not guessed, so it is shown straight away rather than
-                         waiting with the "nothing has connected yet" box below: the twenty seconds that
-                         box waits are twenty seconds of somebody holding a phone at a code that cannot
-                         possibly work. -->
-                    <Border IsVisible="{Binding HasFirewallDiagnosis}"
-                            Background="{DynamicResource BgElevated}"
-                            BorderBrush="{DynamicResource BorderSubtle}"
-                            BorderThickness="{DynamicResource BorderThin}"
-                            CornerRadius="{DynamicResource RadiusLg}"
-                            Padding="12,10">
-                        <StackPanel Spacing="8">
-                            <TextBlock Text="{Binding FirewallDiagnosis}" Classes="note" />
-                            <Button Classes="outlined-sm on-elevated"
-                                    HorizontalAlignment="Left"
-                                    Content="Allow through the firewall…"
-                                    IsVisible="{Binding CanRepairFirewall}"
-                                    Command="{Binding RepairFirewallCommand}"
-                                    ToolTip.Tip="Asks for administrator rights, removes every existing inbound rule for mTiles, and adds one allowing it on private and domain networks" />
-                            <!-- Beside the button that produced it. It used to live only in the box
-                                 below, which appears twenty seconds in: clicking here, answering a UAC
-                                 prompt and being told nothing at all is the silent failure this whole
-                                 panel is written against — and worst for the one answer that does not
-                                 change the diagnosis above, where policy is ignoring local rules. -->
-                            <TextBlock Text="{Binding FirewallResult}"
-                                       IsVisible="{Binding HasFirewallResult}"
-                                       FontSize="{DynamicResource FontXs}"
-                                       Foreground="{DynamicResource TextSecondary}"
-                                       TextWrapping="Wrap" />
-                        </StackPanel>
-                    </Border>
-
-                    <!-- Other addresses -->
-                    <ItemsControl ItemsSource="{Binding Alternatives}"
-                                  IsVisible="{Binding ShowAlternatives}">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate DataType="vm:PhoneAlternativeViewModel">
-                                <Button Classes="choice-row"
-                                        HorizontalAlignment="Stretch"
-                                        HorizontalContentAlignment="Left"
-                                        Margin="0,0,0,4"
-                                        Command="{Binding ShowCommand}">
-                                    <StackPanel Spacing="1">
-                                        <TextBlock Text="{Binding Host}"
-                                                   FontFamily="{DynamicResource TerminalFontFamily}"
-                                                   FontSize="{DynamicResource FontSm}"
-                                                   Foreground="{DynamicResource TextSecondary}" />
-                                        <TextBlock Text="{Binding Reason}" Classes="note" />
-                                    </StackPanel>
-                                </Button>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-
-                    <!-- Firewall help, offered only once nothing has connected -->
-                    <Border IsVisible="{Binding ShowTrouble}"
-                            Background="{DynamicResource BgSurface}"
-                            BorderBrush="{DynamicResource BorderSubtle}"
-                            BorderThickness="{DynamicResource BorderThin}"
-                            CornerRadius="{DynamicResource RadiusLg}"
-                            Padding="14,12">
-                        <StackPanel Spacing="8">
-                            <TextBlock Text="Nothing has connected yet"
+                        <StackPanel Spacing="10" Margin="18,2,0,0" VerticalAlignment="Top">
+                            <TextBlock Text="Point your phone's camera at the code and open the page it offers. It pairs once; afterwards the phone reconnects on its own, from any network."
                                        FontSize="{DynamicResource FontSm}"
-                                       FontWeight="SemiBold"
-                                       Foreground="{DynamicResource TextPrimary}" />
-                            <!-- The guess, and the button that goes with it, only while nothing has
-                                 been read from the machine. Where there is a diagnosis it is directly
-                                 above this box with its own button: two accounts of the same firewall,
-                                 one measured and one imagined, is exactly what the check was added to
-                                 stop. -->
-                            <StackPanel Spacing="8" IsVisible="{Binding ShowFirewallGuess}">
-                                <TextBlock Text="{Binding FirewallExplanation}" Classes="note" />
-                                <Button Classes="outlined-sm on-elevated"
-                                        HorizontalAlignment="Left"
-                                        Content="Allow through the firewall…"
-                                        IsVisible="{Binding CanRepairFirewall}"
-                                        Command="{Binding RepairFirewallCommand}"
-                                        ToolTip.Tip="Asks for administrator rights, removes every existing inbound rule for mTiles, and adds one allowing it on private and domain networks" />
-                                <TextBlock Text="{Binding FirewallResult}"
-                                           IsVisible="{Binding HasFirewallResult}"
-                                           FontSize="{DynamicResource FontXs}"
-                                           Foreground="{DynamicResource TextSecondary}"
-                                           TextWrapping="Wrap" />
-                            </StackPanel>
-
-                            <!-- Not inside the block above: on Linux this is the whole of the help, and
-                                 there is a diagnosis naming the firewall right alongside it. -->
-                            <SelectableTextBlock Text="{Binding ManualFirewallCommand}"
-                                       IsVisible="{Binding ManualFirewallCommand, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
-                                       FontFamily="{DynamicResource TerminalFontFamily}"
-                                       FontSize="{DynamicResource FontXs}"
-                                       Foreground="{DynamicResource TextSecondary}"
+                                       Foreground="{DynamicResource TextPrimary}"
                                        TextWrapping="Wrap" />
-                            <TextBlock Classes="note"
-                                       Text="If your phone is not on this machine's own network, use the Tailscale code instead — a phone on mobile data cannot reach a private address however the firewall is set." />
+                            <TextBlock Text="From the phone you can see every workspace, zoom into a tile, follow an agent's or a goal's conversation as it happens, answer what it asks, type or dictate into it, and press its keys and actions."
+                                       Classes="note" />
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <mi:MaterialIcon Kind="TimerSandComplete" Width="13" Height="13"
+                                                 Foreground="{DynamicResource TextMuted}"
+                                                 VerticalAlignment="Center" />
+                                <TextBlock Text="{Binding ExpiresText}" Classes="note" VerticalAlignment="Center" />
+                            </StackPanel>
+                            <Button Classes="outlined-sm"
+                                    HorizontalAlignment="Left"
+                                    Content="Copy link"
+                                    Command="{Binding CopyLinkCommand}"
+                                    ToolTip.Tip="For a browser on this computer, or to send to yourself" />
                         </StackPanel>
-                    </Border>
+                    </DockPanel>
 
+                    <!-- Paired devices -->
+                    <StackPanel Spacing="6" IsVisible="{Binding HasDevices}">
+                        <TextBlock Text="PAIRED" Classes="section" Margin="0" />
+                        <ItemsControl ItemsSource="{Binding Devices}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate DataType="vm:PhoneDeviceViewModel">
+                                    <Border Background="{DynamicResource BgElevated}"
+                                            CornerRadius="{DynamicResource RadiusRow}"
+                                            Padding="12,8" Margin="0,0,0,6">
+                                        <DockPanel>
+                                            <Button DockPanel.Dock="Right"
+                                                    Classes="outlined-sm on-elevated"
+                                                    Content="Unpair"
+                                                    ToolTip.Tip="Forget this device. It cannot reconnect without a new code."
+                                                    Command="{Binding UnpairCommand}" />
+                                            <mi:MaterialIcon Kind="Cellphone" Width="16" Height="16"
+                                                             Margin="0,0,8,0"
+                                                             Foreground="{DynamicResource TextSecondary}"
+                                                             VerticalAlignment="Center" />
+                                            <mi:MaterialIcon DockPanel.Dock="Left" Kind="Circle" Width="7" Height="7"
+                                                             Margin="0,0,8,0"
+                                                             IsVisible="{Binding IsConnected}"
+                                                             Foreground="{DynamicResource StatusSuccessText}"
+                                                             VerticalAlignment="Center" />
+                                            <TextBlock Text="{Binding Label}"
+                                                       Foreground="{DynamicResource TextPrimary}"
+                                                       FontSize="{DynamicResource FontSm}"
+                                                       VerticalAlignment="Center" />
+                                            <TextBlock Text="{Binding Since}" Margin="8,0,0,0"
+                                                       Foreground="{DynamicResource TextMuted}"
+                                                       FontSize="{DynamicResource FontXs}"
+                                                       VerticalAlignment="Center" />
+                                        </DockPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+
+                    <TextBlock Classes="note"
+                               Text="No port is opened on this computer. The phone and mTiles both connect out to Tailscale's public relays, which pass on end-to-end encrypted bytes they cannot read. A paired phone can type into your terminals, so unpair a device you no longer use." />
                 </StackPanel>
             </ScrollViewer>
         </DockPanel>

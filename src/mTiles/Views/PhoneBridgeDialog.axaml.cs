@@ -11,7 +11,7 @@ using mTiles.ViewModels;
 namespace mTiles.Views;
 
 /// <summary>
-/// The QR panel: what to point a phone at, and what to do when it does not work.
+/// The QR panel: the code to point a phone at, and the phones already paired.
 /// </summary>
 /// <remarks>
 /// <para>An overlay in the main window like every other dialog here. It was a window of its own, on the
@@ -49,7 +49,7 @@ public partial class PhoneBridgeDialog : UserControl
         };
 
         // Started after the window is on screen, so the first thing the user sees is the panel rather
-        // than a frozen main window: discovery shells out to Tailscale and can take a second or two.
+        // than a frozen main window: reaching the relay takes a moment.
         //
         // Wrapped, because this is an async void handler: anything escaping it reaches the dispatcher's
         // unhandled-exception path, where it is a crash rather than a message. The panel has a place to
@@ -68,10 +68,7 @@ public partial class PhoneBridgeDialog : UserControl
             }
         };
 
-        // The panel grows as it learns things — a firewall verdict, a Tailscale hint, a startup
-        // failure each add a block. As a window that needed re-centring and a cap against the screen
-        // on every size change; as an overlay it is centred and clamped by OverlayHost for free.
-        await host.ShowAsync<object>(window, width: 900);
+        await host.ShowAsync<object>(window, width: 720);
     }
 
     private void Close_Click(object? sender, RoutedEventArgs e) => OverlayHost.CloseWith(this, null);

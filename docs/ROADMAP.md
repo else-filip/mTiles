@@ -578,12 +578,10 @@ conversation first and let the terminal be judged on a link that already works.
    machine shares, and a **client** that holds a read model of somebody else's. `Tailcat.Link` is then a
    dependency of one adapter rather than of the application, which is also what lets the WebSocket
    transport serve the browser through the same contract and `Tailcat.TestSupport`'s in-memory relay
-   drive the tests without a network. **The browser half costs no new dependency and little new ground**:
-   `mTiles.csproj` already carries `<FrameworkReference Include="Microsoft.AspNetCore.App" />` for the
-   phone bridge, and `PhoneBridgeServer` is the worked precedent for every part of it — a Kestrel host
-   with one delegate and `UseWebSockets`, a single-use token redeemed for a session, a `Host` allow-list,
-   SNI certificate selection — with `PhoneBridgeManager`'s `ShouldKeepRunning`/`StartAsync`/`StopAsync`/
-   `DisposeAsync` as the lifecycle shape `App.ReleaseBackgroundServices` already knows how to shut down.
+   drive the tests without a network. **The browser half is already built for the phone**:
+   `site/phone/` is a static page on the vendored browser client, paired through an invitation in the URL
+   fragment, and `PhoneBridgeManager` is the worked precedent for a host whose lifetime
+   `App.ReleaseBackgroundServices` already knows how to shut down (ADR 0006).
 2. **Subscribe by sequence number.** `IConversationStore.LastSequence` and the numbering on every event
    already make this free: a client says "I have up to N", the host answers with the tail and then the
    stream. A link drops every time a laptop lid closes, so *resume* is the normal case and not the

@@ -1,4 +1,3 @@
-using System.Text.Json;
 using mTiles.ViewModels;
 
 namespace mTiles.Services.Phone;
@@ -30,15 +29,4 @@ internal static class PhoneTileActions
     /// phases without anybody pressing anything.</remarks>
     public static bool IsAllowed(IReadOnlyList<TileAction> actions, string id) =>
         ForPhone(actions).Any(a => a.Id == id && a.IsEnabled);
-
-    /// <summary>The message a phone is sent whenever the active tile or its state changes.</summary>
-    public static string Describe(string tileName, IReadOnlyList<TileAction> actions) =>
-        JsonSerializer.Serialize(new
-        {
-            type = "actions",
-            tile = tileName,
-            actions = ForPhone(actions)
-                .Select(a => new { id = a.Id, label = a.Label, icon = a.Icon, enabled = a.IsEnabled })
-                .ToArray(),
-        });
 }

@@ -726,28 +726,114 @@ Settings only has to gate the UI.
 
 ---
 
-## Dictating from a phone
+## Dictating from a phone — and following your agents from one
 
-The microphone is next to *you*. Over Remote Desktop, mTiles is not — which makes dictation unusable
-exactly where it would help most. The QR button beside Settings opens a panel; the phone that scans a
-code there becomes the microphone, and everything downstream of the samples is the pipeline described
-above, unchanged. It is push-to-talk on the phone instead of Alt+Space on the keyboard, and the text lands
-in the same place either way: the tile that is active when you speak — and, like the shortcut, into the
-focused text box first when there is one, so dictating into a Note from a phone works. That focus is
-resolved on the UI thread when the recording starts, for the same reason the shortcut resolves it then:
-the words belong where the user was looking when they spoke.
+The microphone is next to *you*. Over Remote Desktop, mTiles is not; on the sofa, neither is the screen.
+The QR button beside Settings pairs a phone, and from then on the phone is a remote for the whole window:
+every workspace, each one's layout drawn to scale, and any tile zoomed into — an Agent or a Goal tile's
+conversation as it happens, with its approvals, questions and plan to answer; a terminal's screen as
+text, with the arrows, Escape and Enter; typing; hold-to-talk dictation into that tile; and whatever
+actions the tile offers a phone. Recognition still runs here, through the pipeline above, unchanged.
 
-The page also carries **six keys** — Enter, the four arrows and Escape. Dictating a command is only
-half of driving an agent from the sofa: the other half is answering the prompt it stops on, which is a
-choice moved through with the arrows and taken with Enter, and dismissing the screens it puts up, which
-is Escape. See *Enter and the arrows* below.
+**Nothing listens to the network.** Both ends dial *out* to Tailscale's public DERP relays through
+[tailcat-link](https://github.com/b-y-t-e/tailcat-link) (`Tailcat.Link` on NuGet, and its browser client
+vendored into `site/phone/vendor/`), which pass sealed bytes between two public keys and cannot read
+them. There is no port, no certificate and no firewall rule, and the phone does not have to be on the
+same network — or on Tailscale. This replaced a Kestrel HTTPS server with self-signed certificates, a
+Windows firewall diagnosis and repair, and a ranker choosing between LAN, Tailscale and mDNS addresses:
+every one of those existed only because a port had to be opened and then found. The reasoning is in
+ADR [0006](adr/0006-phone-over-relays.md).
 
-The button is **window-level rather than per-tile**. It started in the tile header next to the microphone,
-which read as "dictate into *this* tile" — something the feature neither promises nor could deliver, since
-the destination is resolved when the recording starts, not when the panel was opened. Next to Settings it
-says what it actually is: a way to reach the application.
+Everything on this side lives in `Services/Phone/`; the page is `site/phone/`, published to GitHub Pages
+by `.github/workflows/pages.yml`.
 
-Everything lives in `Services/Phone/`.
+### Where the page comes from
+
+A browser gives the microphone and WebCrypto only to a secure origin, and with no port open mTiles cannot
+serve the page itself — so it is a static site at `https://b-y-t-e.github.io/mTiles/phone/`
+(`PhoneSettings.PageUrl`, not on any settings page; a developer points it at `node site/phone/serve.mjs`).
+The QR code is that URL with the **invitation code in its fragment**, which a browser never sends to the
+server: GitHub serves the page and never sees the code. The page reads it, pairs, and takes it out of the
+address bar.
+
+The DERP map has to come from the page's own origin — `tailcat.dev` serves it without a CORS header — so
+the Pages workflow copies it in on every deploy and weekly. The relays themselves are reached over
+`wss://`, which CORS does not govern.
+
+**An injected script on that origin is a shell on the paired machine.** The pairing lives in the page's
+IndexedDB, so anything that runs there can use it. Hence: a strict Content-Security-Policy (scripts,
+styles and fonts from the origin only, sockets only to it and the relays), no third-party script or font
+(tweetnacl and JetBrains Mono are vendored), and **no `innerHTML` anywhere** — `markdown.js` parses what
+an agent wrote into plain objects and builds elements whose text is set through `textContent`, and a link
+is drawn only for `http`/`https`. `site/phone/test/` pins the parser never producing markup.
+
+### Pairing
+
+`PhoneBridgeManager` holds one `ILinkHost` (`TailcatLink.HostManyAsync("mtiles-phone")`, at most
+`MaxDevices` = 4 — a security bound, since every paired device can type into the terminals). The panel
+mints a **single-use invitation valid for five minutes**, withdraws it when it closes, and puts up a fresh
+one after a phone pairs, since the one on screen is spent. Unpairing is `ForgetPeerAsync`: the phone is
+dropped and refused if it comes back, and the page says so and offers to forget that computer. The link's
+identity and its list of peers are in `phone/mtiles-phone.link.json`, the key DPAPI-protected on Windows
+and `0600` elsewhere.
+
+The page keeps one pairing per computer, named after the host's public key, so one phone can hold a
+desktop and a laptop and switch between them.
+
+### Starting and stopping
+
+The link is up when **a phone is paired** (`PhoneSettings.HasPairedDevices`, written by the bridge on
+every pairing and unpairing, because it has to be known before there is a link to ask), when **Keep
+connected** is on, or while the panel is open. A machine that has never shown a QR code never dials a
+relay. The QR button is no longer tied to dictation being switched on: following agents needs no
+microphone, and the page offers hold-to-talk only where this machine can transcribe.
+
+Closing the application is not unpairing. The Kestrel bridge's leftovers — `bridge.pfx`, which holds a
+private key, and `sessions.json` — are deleted on the first start.
+
+### The protocol
+
+`PhoneProtocol` is the whole of it. **Requests** are JSON with a `type` (`hello`, `workspaces`, `layout`,
+`open`, `watch`, `tile`, `send`, `key`, `choose`, `answer`, `interrupt`, `action`), answered with
+`{"ok":true,…}` or `{"ok":false,"error":"…"}`; anything that is not exactly a request — malformed JSON, a
+number where a string belongs, a key name outside the six — gets the error and never an exception.
+`hello` exchanges `PhoneProtocol.Version`, because the page is hosted separately and either may be the
+newer: a mismatch is a screen saying which one to update, not a guess.
+
+**Pushes** are notifications the page did not ask for: `session` (dictation state), `workspaces`,
+`layout`, `tile`, `tileGone`, `text` (what was heard, to the phone that spoke only) and `error`. What each
+phone is sent follows what it says it is looking at (`watch`), and is **sampled, not evented**: four
+times a second while a phone is connected, each tile's `IRemoteViewTile.RemoteVersion` is compared and
+only a tile that moved is described again, and anything identical to what that phone was last sent is not
+sent. What a phone shows is drawn from half a dozen view models across several kinds, and a missed event
+anywhere is a phone showing yesterday's state with nothing to say so — a counter per tile makes sampling
+cheap enough not to need them.
+
+**What a tile shows is the tile's answer** (`IRemoteViewTile`, see `docs/TILES.md`): the Agent tile
+projects the same `ConversationState` its transcript is drawn from (`AgentChatProjection` — a work group
+folded to one line per step, output and reasoning left out, the last 60 entries with the rest counted),
+the Goal tile its messages and whichever block it is waiting on (`GoalChatProjection`), and a terminal its
+**screen as text** — `TerminalControl.ReadScreenText` (Terminal.Avalonia 0.4.2), the last frame rather
+than the stream that drew it, which is the only reading of a full-screen agent that means anything off
+the grid. A tile that implements none of it can still be zoomed into if it takes text or offers a phone
+an action; otherwise the miniature draws it dimmed. The phone's answers go through the same commands the
+tile's own buttons run, and are checked against what it is waiting on *now*: an approval answered after
+it was replaced is refused, not applied to the next one.
+
+**Actions** answer as soon as they are allowed and run afterwards; a failure is pushed. Continue on a Goal
+tile is minutes of work, and a request waiting on it would time out on the phone long before.
+
+### Audio is a channel per utterance
+
+Not a request per frame — that is a round trip and a ledger entry each — and not a request then frames,
+because ordering between a request and a channel is not promised. One channel (`audio`) per utterance:
+its first frame is a JSON header naming the tile and the sample rate, 16-bit PCM follows, a one-byte
+frame of zero throws the recording away, and the channel **closing on purpose** ends the sentence. A
+channel that ends with the session instead is a cancel: half a command typed into a terminal is worse
+than none. Frames spoken while the channel opens are held by the page and sent after the header.
+
+A refusal — dictation off, no model, already recording — comes back as a pushed `error` with its own
+sentence, since the phone is usually the only screen the user is looking at.
 
 ### The seam is `IAudioCapture`
 
@@ -761,7 +847,7 @@ still being closed. Routing `Finish` by "whichever backend is current" would the
 recording on the wrong device: silence delivered to the tile, and the real audio dropped. Tagging the
 handle at `Detach` makes that unrepresentable.
 
-**Audio is buffered before the recording starts.** The phone announces its sample rate on a socket
+**Audio is buffered before the recording starts.** The phone announces its sample rate on the link's
 thread; starting a dictation has to happen on the UI thread; audio is already arriving in between.
 `PrepareForStream` opens the buffer that `Start` later adopts. Without it, push-to-talk loses the first
 word of every utterance.
@@ -782,7 +868,7 @@ alone does not. Going to the background releases it at once rather than waiting 
 
 **Raw PCM, no codec.** `MediaRecorder` gives webm/opus on Android and mp4/aac on iOS, so accepting its
 output would mean shipping two container decoders. An `AudioWorklet` hands the page float samples
-directly; it converts to 16-bit and sends them — 32 KB/s on a LAN or a WireGuard tunnel. The page does
+directly; it converts to 16-bit and sends them — about 32–96 KB/s, relayed. The page does
 **not** request a sample rate (iOS ignores the request and runs the hardware's anyway); it reports what
 it got, and `AudioResampler` — the same one the desktop microphone uses — converts.
 
@@ -791,524 +877,22 @@ timer is armed only when the recording starts through it; here the samples come 
 a network, so "the phone stopped sending" is a thing that can simply never happen — a pocketed phone
 with a wedged page holds the connection open.
 
-### TLS is not optional
-
-**A browser hands out no microphone outside a secure context.** That single fact shapes the rest:
-
-- **`HttpListener` cannot serve this.** It only does HTTPS against a certificate bound to the port with
-  `netsh http sslcert`, which needs administrator rights. Hence **Kestrel**, via a `FrameworkReference`,
-  for this one server. The database bridge stays on `HttpListener`: it serves loopback over plain HTTP,
-  which `HttpListener` does without ceremony. The remaining option was a hand-written HTTP and WebSocket
-  implementation over `SslStream`, on the one socket in this application that faces the network.
-- **The sources are not alternatives.** Each certifies a different subset of the addresses this one
-  socket is answering for, so `PhoneCertificateProvider` collects them all and TLS picks per connection
-  by SNI (`PhoneTlsMaterial.Select`). Taking the first source that answered was a bug with teeth: on a
-  machine running Tailscale, a phone connecting over the LAN was served the `.ts.net` certificate — a
-  *name mismatch*, which is a worse warning than the self-signed one it replaced, while the panel
-  cheerfully promised no warning at all. "Will this warn?" is therefore asked per host, because with two
-  certificates in play the two QR codes on screen genuinely differ.
-- **`TailscaleCertificateSource`** asks `tailscale cert` for a real Let's Encrypt certificate for the
-  machine's MagicDNS name. The only source that produces a page a phone opens without complaint.
-- **`SelfSignedCertificateSource`** is the fallback and the only option on a LAN, because no public
-  authority will certify `192.168.1.20`. It is **kept on disk**: a new certificate every launch would
-  mean a new warning every launch, and a user trained to dismiss certificate warnings is a worse outcome
-  than the warning. Regenerated when the address set changes, because a certificate is only accepted for
-  a host in its SANs — and on a laptop that set changes with every network joined. It covers **every**
-  advertised address, not any: one covering three of four passes an "any" check and then fails on the
-  fourth, in the browser, as a warning the user cannot act on.
-- PEM-loaded certificates are round-tripped through PKCS#12 on Windows. `CreateFromPemFile` produces a
-  private key SChannel refuses, and it fails during the handshake rather than at load.
-
-### The socket
-
-**Sends are serialised per connection.** A `WebSocket` permits exactly one send at a time and *throws* on
-a second rather than queueing. Broadcasting without awaiting was right — a stalled phone must not hold up
-the dictation service's state change — but broadcasting without serialising was not: a state change and
-the transcript that follows it are milliseconds apart, so on any connection slower than a LAN the
-transcript was the message thrown away. The one thing the user was waiting for, lost exactly when the
-network was bad enough to make them stare at the phone. A continuation chain rather than a semaphore,
-because order matters as much as exclusion: "transcribing" arriving *after* the transcript reads as a
-phone that never finished.
-
-**A second `begin` from a connection that is already recording is ignored.** Assigning the outcome to the
-ownership flag lost the recording for good: the manager refuses the second request *because* it is already
-recording, so the flag went false — and from then on nothing could stop what was running. Not `end`, not
-`cancel`, not disconnecting. It ran to the five-minute cap with the tile stuck in "recording" and the
-phone unable to do anything about it.
-
-**The transcript goes to the phone that spoke, not to everyone.** Broadcasting it put one person's
-dictation on every paired device — a second phone in the room, or the browser left open on the near
-machine. State messages still go to all of them, because "mTiles is busy" is true for all of them.
-
-**Ending a pairing ends the socket it opened.** Membership is tested at the handshake and never again,
-so revoking a session only forgot it: the phone stayed connected and could keep dictating into the
-terminal, which is precisely what the panel's "Disconnect this device" button claims to stop. Each
-connection remembers its session id, `PhonePairing` raises `SessionEnded`, and the server — the only
-object that knows which socket belongs to which pairing — closes it. Expiry takes the same path.
-
-**A recording belongs to the connection that started it.** Only its owner may end or cancel it, only its
-frames are written, and only its disconnection cancels. The panel supports several paired devices, so a
-second phone dropping off the network is ordinary use — and it used to cancel whatever the first one was
-in the middle of saying.
-
-**The pairing URL never becomes the page's address.** `/p/{token}` sets the cookie and answers `302 →
-/`. Serving the page directly left the token in the address bar, in the browser history and in whatever
-the phone syncs that to — a spent token, but one readable over the shoulder for as long as the page
-stayed open. An HTTP redirect leaves no history entry of its own, so the trail really does end there.
-
-**A paired device can reload the page.** `GET /` serves the page to a valid session cookie. Without that
-route the only way in was `/p/{token}`, and pairing tokens are single-use by design — so a phone that
-refreshed, or was locked and reopened its browser, held a perfectly good session and could reach nothing
-with it. It had to be handed a fresh QR code from a machine that might be in another building, which made
-"keep running so a paired phone reconnects on its own" a promise the server could not keep.
-
-### Enter and the arrows
-
-Six buttons under the talk button, and one more message type on the same socket:
-`{"type":"key","key":"enter"|"up"|"down"|"left"|"right"|"escape"}`. `PhoneKeys` is both ends of that
-name — the page's list and the server's — and everything outside it is answered with silence.
-
-**A closed set of six, decided in this process.** The obvious generalisation is a key *name* off the
-wire, and it is the wrong shape: what arrives has crossed a network from a device paired once and left in
-a coat pocket, and where it arrives is a shell. Six is also all the job needs.
-
-Closed at *both* ends, which took a second pass to get right. Parsing a name was already a closed list;
-turning one into a keystroke was a two-arm switch with `Enter` as its fallback, so a new key added to
-the enum and to the wire names and missed there would have been delivered as Enter — of the six, the
-one that cannot be taken back, since it answers whatever prompt the agent is sitting on with that
-prompt's default. Every member is now spelled out and the default throws, which the wrapper below turns
-into "could not deliver that key"; a test walks the enum so the lists cannot drift apart without
-the build saying so.
-
-**They go where the transcript goes, by the same rule** — and by the same *code*: both destinations come
-from `DictationTextSink` (`WritableTextTarget`, the focused control when it is a writable text control
-still on screen; `LiveTerminal`, the active tile's terminal when its shell is still running), which
-`PhoneKeys` calls rather than working out again. Not a simplification: the two are used in one breath.
-You dictate a line, then press Enter to send it. A key that chose its target by a different rule than the
-text did would submit an empty prompt in one place while the sentence sat in another — and two copies of
-that rule is how the two rules come to differ, silently, the first time a third kind of text control is
-added to one of them. What is *done* with the target stays where it is done: inserting a transcript into
-a `TextBox` and into a `TextEditor` have nothing in common, so that dispatch is a second switch, and a
-type that reaches the resolver but not it falls through to "nowhere to put it" rather than to a wrong
-destination. The target is resolved at the press, because half a minute can pass between the two and the
-user may have switched tiles.
-
-**A synthesised `KeyDown`, not bytes on the pipe.** What Up means on the wire is the terminal control's
-decision and it changes under the application's feet: DECCKM — which every full-screen agent sets — turns
-`ESC [ A` into `ESC O A`, and in win32-input-mode keys travel as INPUT_RECORDs, where a bare `\r` is not
-what the child is parsing. Neither mode is exposed, and a copy of that table here would be one more thing
-to keep in step with a library that already has it right. It is also the only way the text-control branch
-can work at all: there is no string that means "Enter" to a `TextBox`.
-
-**Not tied to a recording, but held back by one.** `end` and `cancel` belong to the connection that
-started the stream; a key belongs to nobody, because the moment it is wanted is *between* utterances.
-Tying it to stream ownership would have made the keys work only while the talk button was held down.
-
-What the keys *are* gated on is time rather than ownership: they go grey while this device is recording
-and while mTiles is transcribing. The keys need no permission, no model and no audio — but the sentence
-Enter is meant to send does, and it has not arrived yet. Both sides of mTiles run on the same UI-thread
-queue and a transcript is only queued once recognition has finished, so a key pressed inside that window
-is not racing the words, it is deterministically ahead of them: the Enter reaches whatever prompt the
-agent is sitting on and takes its default answer, and the sentence lands underneath afterwards, unsent.
-Which is the exact reverse of the gesture — stop speaking, reach straight for Enter — that the buttons
-exist for.
-
-The gate is on **mTiles' state, not the page's**, and that distinction is the whole of the second attempt
-at this. Recording counts as well as transcribing, because tap-to-talk leaves the user's hands free
-during their own utterance — but gating on *this page's* recording flag covered only the device that
-pressed. mTiles broadcasts three states, and everything that is not `idle` is somebody speaking: a second
-phone in the room, or the shortcut held on the computer itself, arrives here as `recording` while this
-page's own flag is false, and its keys were live. That is the same race the gate exists for, in the
-multi-device configuration this page is built for. The page's own flag is kept beside it, because it is
-true a round trip before mTiles has said so, and for the same reason letting go assumes transcription has
-started rather than waiting to be told — that gap is exactly when the reach for Enter happens.
-
-Only the **state channel** and a dropped connection ever clear it — which is why mTiles answers a refused
-`begin` with its **current state** as well as the reason. That is not belt and braces: a page sets its own
-`recording` when it *sends* `begin`, because the microphone is already capturing and waiting for an answer
-would cost the first syllable, so a release that beats the refusal home leaves the page assuming an
-utterance is on its way to be transcribed. None was — and a refused begin causes no dictation transition,
-so nothing would ever have said so. The keys stayed dead until the socket dropped. The state also tells
-the two kinds of refusal apart, which the words cannot: *"already recording"* arrives with `recording` and
-must leave the keys alone, *"switched off"* arrives with `idle` and must not.
-
-A refusal never clears the flag on its own, and that took two attempts to get right: it looks like the safe thing to do, and it is the wrong thing, because two of the
-refusals a `begin` can get are *"mTiles is already recording"* and *"mTiles is still working out the
-previous recording"* — which say the opposite, and are the only ones that can arrive while the flag is
-true. Letting go and pressing again during the transcription is an ordinary gesture (the talk button is
-deliberately live then; pressing it is how you find out why nothing happened), and the refusal it earns
-was re-enabling the keys for the length of the user's own sentence. Nothing is stranded by leaving it:
-the flag is only ever set for a recording mTiles accepted, so a state message is always coming.
-
-**What it grants, said plainly.** What pairing protects is the keyboard — see below — and a paired device
-could already type an arbitrary line into the terminal. What it could not do, with the phone's auto-Enter
-off (which is the default), is *run* it. That is the change, and an earlier version of this note claimed
-there was none: it said the grant was already covered, on the strength of a clause reading "and, with the
-phone's auto-Enter on" — the one configuration in which it was true. On a machine with no speech model at
-all the change is larger still, because there a paired device could previously do nothing whatever, and
-these keys are gated on nothing dictation is gated on: no model, no microphone, no speech engine. A
-machine that cannot transcribe a word can now be driven from the phone, which is the case this whole
-feature exists for and is also, exactly, a new capability.
-
-**And it is deliberately not behind `Phone.AutoSubmitEnter`**, though the temptation is obvious. That
-setting governs mTiles pressing Enter *for* the user, on every transcript, before they have seen what was
-transcribed — off by default because a mis-heard sentence then runs as a command, and its own note says
-the switch exists so somebody can opt in knowingly. A button is the opposite gesture: the user pressing
-Enter, having read the transcript the page is showing them. Gating the smaller, explicit act on consent
-to the larger, automatic one would read as "you may not press Enter unless you have agreed that Enter is
-pressed for you", and it would leave the arrows — which submit nothing — either gated on an Enter setting
-or split from the key they sit beside. The honest boundary is the one that was always here: pairing. What
-is worth watching is the accidental press, since a phone left unlocked in a pocket now has a button that
-runs whatever line is in the prompt; the button flashes on tap rather than latching, and nothing here
-repeats.
-
-**A refusal is a sentence, and the button acknowledges itself.** mTiles answers a key that landed with
-nothing — the screen that changes is the computer's — so the button flashes on tap, because otherwise the
-phone gives no sign of having heard it and the user presses again, which for Enter means submitting
-twice. A key that could not be delivered (no tile, or a tile whose shell has exited) comes back with the
-reason, for the same reason every other refusal here does: the phone is usually the only screen the user
-is looking at.
-
-It arrives as **`keyError`, not `error`**, and the two are shown in the same box. The word is not
-cosmetic: `error` is the answer to *this device's dictation attempt*, and the page undoes its own
-assumptions on one — that it is recording, that mTiles has an utterance in hand, that the microphone can
-be let go. None of that is true of a keystroke. Sharing the word had a key refusal clear a busy flag that
-belonged to whoever was actually speaking — re-enabling the keys for the length of somebody else's
-utterance, which is the race the gate above exists for — and release a microphone over a keypress.
-
-### Which address the QR code points at
-
-A developer machine has half a dozen: LAN, Tailscale, Hyper-V, WSL, Docker. A QR code holds one URL.
-
-`PhoneEndpointRanker` is pure — no network card, no phone, no server — because it is the one part of
-this feature whose behaviour is an opinion. `PhoneEndpointRankingTests` is where that opinion is argued.
-
-The signals, in order of how much they are trusted:
-
-1. **What actually worked last time.** Reported by the phone itself when it loads the page, and the only
-   measured fact here — which is why it outranks every heuristic.
-2. **Where the user is sitting.** `SM_REMOTESESSION` says whether this is a console or an RDP session.
-   The phone is next to the *user*, so at the console a LAN address is the answer and over RDP it cannot
-   work at all. Nearly free, and it is the whole difference between a good guess and a coin toss.
-3. **Whether the adapter has a default route.** This alone separates real network cards from the pile of
-   virtual ones, without a name list that goes stale — a virtual switch has no default route because
-   nothing behind it routes anywhere. The name list is a backstop that only demotes what the route test
-   already demoted.
-
-IPv4 only. An IPv6 link-local address carries a zone index (`fe80::1%14`) that no phone browser can be
-given, and a global IPv6 is rare on the home networks this is for — so offering them would add rows that
-mostly do not work.
-
-**The pin is per session location, not global.** One machine gets used both ways. Sitting at it, the LAN
-address is right; connected to it over RDP, only a tunnel reaches the phone in the user's hand. The
-machine is identical in both cases, so a single remembered winner would have each day's answer overwrite
-the other's and be wrong every time the user switched.
-
-**Both audiences are always shown.** The panel draws one code for "phone on this Wi-Fi" and one for
-"phone anywhere else"; the session location decides the *order*, never what is on screen. Being wrong
-about the order costs a glance; being wrong about what to show costs the whole feature. That is also why
-`PhonePairing` allows several live codes at once — a single-token scheme would silently invalidate the
-code most likely to be scanned *after* the first one failed.
-
-Adding a way of reaching the machine — a reverse tunnel, a mesh VPN with its own naming, an SSH forward
-— is a new `IPhoneEndpointSource` in the list `PhoneEndpointDirectory` is built with. Neither the
-ranking nor the server nor the panel changes, because none of them enumerates kinds: they know only the
-two audiences.
-
 ### The thing being protected is the keyboard
 
-Not the audio. Anything that reaches this server can type into the terminal the user is looking at, so
-an unauthenticated bridge on a LAN or a tailnet is a remote shell for everyone on that network.
+What a paired device can cause: type into a tile, press six keys, answer what an agent asks, and press
+the actions a tile offers a phone. **Destructive actions are never offered** (`PhoneTileActions`, the one
+filter for what is shown and what may be pressed) — Restart shell, deleting a conversation — nor anything
+that opens a dialog on a desktop nobody is at. Answering an approval *is* a grant, the same one the
+desktop's button makes, and deliberately so: stopping on a permission prompt is the moment somebody on
+the sofa most needs to act.
 
-Two tokens. The **pairing** token is the one in the QR code: short-lived and single-use, because a QR
-code is displayed on a screen other people can see and lives in a phone's camera history for months.
-Redeeming it yields a **session** token that never appears in a URL, a QR code, or on screen — so a
-photographed code is worthless once the owner has scanned it, and worthless anyway two minutes later.
-Comparisons are constant-time, including the lookup, which is scanned rather than hashed for that
-reason. Closing the panel withdraws every displayed code, which makes closing it a way to revoke.
-
-**The panel replaces its codes every eighty seconds**, well inside the two minutes, and that is not
-housekeeping — it is the difference between the feature working and not. The ordinary way this panel is
-used is: open it, walk off to fetch the phone, come back. Nothing was replacing the codes, so the user
-returned to a code that had quietly stopped working, scanned it, was told the pairing had expired, and
-was then offered the firewall as the likely cause by the panel's own troubleshooting text. Wrong answer,
-confidently given, to the one scenario the panel is mostly opened for. Refreshing stops while a device is
-paired: there is nothing to keep alive then, and swapping a code somebody may be photographing to add a
-second device is its own small betrayal.
-
-**Which codes are still good is the pairing store's to answer, not the panel's.** Only so many tokens may
-be live at once and issuing one past that limit silently invalidates the oldest, so the panel has to drop
-the same code the store dropped. It used to work that out itself, from its own issue counter, and had
-already got it wrong once — it trimmed in display order, which is reversed, so it kept the dead code and
-threw away the live one. It now asks `IsPairingTokenLive`, which also covers the case a private copy of
-the rule could not see at all: a code that simply ran out of time on screen.
-
-**Pairings survive a restart, and what is stored is a digest.** The session file holds SHA-256 of each
-token, never the token — a bearer credential at rest is a standing grant of terminal access to whoever
-reads the file or an old backup of it, and the digest is enough to answer both questions that matter
-(is this device paired, and what did it call itself). It doubles as the handle the panel revokes by, so
-nothing anywhere needs the raw value once the cookie has been handed out. Shutting down does **not**
-forget the devices; turning the bridge off does. Getting that backwards would have made the file
-pointless, since every run would erase what the last one wrote — and it is what "keep running so a paired
-phone reconnects on its own" actually rests on.
-
-**The session cookie is `SameSite=Lax`, not `Strict`.** It is set on a response that is also a redirect,
-at the end of a navigation that began outside the browser entirely — a camera app opening a scanned URL —
-and `Strict` is defined against exactly that shape; several browsers withhold the cookie on the redirect
-that follows. The cost of being wrong is not a retry but the end of the road, because the pairing token
-has already been spent by the time the redirect is issued. `Lax` still withholds the cookie from
-cross-site subresource requests and cross-site POSTs, and everything this page does afterwards is
-same-site. *Not verified on iOS Safari here* — worth checking on the first real device.
-
-An empty allow-list refuses everything rather than allowing it. Unreachable in practice — the set is
-filled before the socket opens — but a security check whose degenerate case is "let it through" is the
-wrong way round however unreachable that case looks today.
-
-The `Host` header is checked against the addresses we advertised — defence in depth against DNS
-rebinding — and the page carries a CSP whose `connect-src` pins the socket to this server. That
-directive names the socket's own `wss://` origin as well as listing `'self'`, deliberately: whether
-`'self'` extends to a `wss:` URL on the same host is a corner of CSP browsers have disagreed about, and
-WebKit blocked it for several releases. iOS Safari is the first platform this feature is used from, and
-getting it wrong fails in the worst available way — the page loads, the microphone opens, the user
-speaks, and nothing arrives, with the reason in a console nobody has open on a phone. The origin is
-spelled out rather than a bare `wss:` scheme, which would have allowed a socket to any server anywhere
-and given away the one thing the directive is here for. The device label the phone sends is stripped of
-control characters before it reaches the screen: it is attacker-controlled text, and a terminal
-application is the last place an escape sequence should arrive by accident.
-
-**What the self-signed certificate does and does not buy you.** On a LAN there is no alternative — no
-public authority will ever certify `192.168.1.20` — so the phone shows a warning and the user accepts
-it. Accepting it pins nothing: the browser trusts *that* certificate for *that* host, and it has no way
-to tell one self-signed certificate from another issued for the same name. So the guarantee is
-**encryption without authentication**. Somebody already positioned to answer for that address on that
-network — ARP spoofing on the Wi-Fi, a rogue access point, a hostile router — can present their own
-certificate, and the phone will show the same warning the user has been trained by this feature to
-accept. What they gain by it is the audio and the ability to type into the terminal, which is the whole
-of what the bridge does.
-
-Three things bound that. It is not a passive attack: the traffic is encrypted, so listening is not
-enough — the attacker has to intercept and terminate the connection, from a position on the local
-network. The session token is the second lock, and it never crosses the wire in the clear or appears in
-a QR code, so impersonating the server is not by itself impersonating a paired device; the useful window
-is a phone actively pairing or reconnecting. And the bridge is off by default and stops listening once
-the panel closes and no device is paired, so the exposure is minutes on a network the user chose, not a
-standing service.
-
-The honest summary is that **the LAN code trusts the LAN**. That is why Tailscale is the recommended
-path rather than a convenience: its MagicDNS name carries a real certificate from a real authority, so
-the phone shows no warning at all, and the identity of the far end is actually checked. If the network
-is one where the above matters — a shared office, a conference, anywhere the user would not hand
-somebody a terminal — the Tailscale code is the one to scan, and it is always on screen beside the other
-one for exactly that reason.
-
-*Not verified on a real device here.* The self-signed handshake on Android and on iOS, and how each
-presents the warning, are the first things to check on the first real phone.
-
-The bridge is **off by default** and, unless Settings says otherwise, listens only while the panel is
-open or a phone is still paired. Every other server here binds loopback; this one has to accept
-connections from the network to be of any use, so it runs when it is being used rather than because the
-application is open.
-
-### Starting and stopping
-
-**Every start and stop is serialised.** Three callers reach `StartAsync` without coordinating: the panel
-opening, the application starting with the setting on, and any settings change — which includes the one
-this class makes itself when it pins the address a phone arrived on, *during that phone's own pairing
-request*. Two overlapping starts both saw no running server, both built one, and the second failed to
-bind; its error path then called `StopAsync` and disposed **the first one's** server. The user was told
-"port already in use", naming a port nothing but this application was using, and left with a bridge that
-had just stopped listening. `StartAsync`/`StopAsync` take a semaphore and delegate to `…CoreAsync`, so the
-error path cannot deadlock on the lock its caller holds.
-
-**Restarting is keyed on the address set, not only the port.** The server fixes its allowed `Host` values
-and its certificate's names when it starts, so a bridge left running across a change of network — exactly
-what "keep running" invites, on a laptop — kept answering for addresses this machine no longer has and
-rejecting the one it now does. The panel would draw a perfectly good QR code for the new address and the
-phone that scanned it met a bare `400`: no page, no explanation, nothing in the panel suggesting anything
-was wrong. `PhoneBridgeManagerTests` asserts that one through what the server *answers*, because every
-assertion about what the manager believes passed against the broken version too.
-
-**A restart for reconfiguration keeps the pairings**; only a real stop revokes them. Connecting a VPN
-only ever *adds* a way to reach this machine, and having that silently unpair the phone in the user's
-hand would be the feature undoing itself. The phones reconnect with the cookie they already hold — which
-only works because of the `GET /` route above.
-
-**"Look again" reconfigures, it does not merely redraw.** Re-ranking alone produced codes for addresses
-the running server had never been told about — its allowed hosts and its certificate are fixed when it
-starts — so the button that exists for "this is not working, look again" handed back a perfectly good QR
-code that answers `400`.
-
-**Closing the panel waits for the start it interrupted.** Releasing the hold while the bridge was still
-coming up meant the "may this stop now" check found nothing to stop, and the bridge then finished
-starting with nothing holding it: listening to the network against a setting that says not to.
-
-**A change of address restarts the bridge, panel or no panel.** `NetworkAddressChanged` is what makes
-"keep running" survive a laptop: the address set was otherwise only re-read when the panel opened, and
-the whole point of that setting is that the panel never has to be. A machine that joined another network
-kept a server configured for the old one — answering for addresses it no longer had, holding a
-certificate that did not name the one it did, and turning away the paired phone trying to come back, with
-nothing on screen to say so because nothing was on screen. The event arrives in bursts, several times per
-Wi-Fi handover, so it shares the debounce with Settings.
-
-**A failed start does not unpair anything** — not on disk and not in memory. The failure path went
-through the same code as "the user switched this off", which forgets the stored devices, so a machine
-that had just woken with no address yet permanently unpaired every phone. Keeping the file but still
-clearing the list in memory was only half the fix, and a worse kind of wrong: the phone was paired
-according to one and not the other, so it could not reconnect until mTiles was restarted. There is no
-server at that point, so a live session can do nothing anyway.
-
-**Expiry is swept for, every five minutes while the bridge runs.** Nothing else notices one: a session
-that timed out went on counting as "a phone is paired", which is one of the two things keeping this
-listening — so with the setting off and the panel closed, one phone paired at breakfast held the socket
-open for the rest of the day. The sweep drops what is stale, raises `Changed` so the panel stops showing
-a device that is gone, and re-asks whether the bridge is still needed. A dictionary scan against an
-eight-hour timeout costs nothing, and it is what makes the "least exposure" promise true rather than
-nearly true.
-
-**The reaction to Settings is gated on the two values it can act on.** This listens to the whole settings
-file, so without the gate every keystroke in any settings box scheduled a reconfiguration — and a
-reconfiguration re-reads the machine's addresses, which shells out to `tailscale status`. Typing a font
-name was spawning processes. Addresses are now only re-read when `NetworkAddressChanged` says they may
-have moved.
-
-**The configured port is a preference, not a demand.** On Windows the kernel reserves blocks of ports for
-Hyper-V, WSL and Docker at boot — `netsh interface ipv4 show excludedportrange protocol=tcp` lists them —
-and a port inside one can never be bound, however free it looks. It is not a collision with another
-program either: `netstat` attributes it to PID 4, the kernel. The default 18091 landed inside such a block
-on the first machine this ran on, and the panel reported "port already in use" about a port nothing was
-using. So a bind failure falls back to a free port and the panel says which one was taken; `0` in Settings
-means "choose one" outright. Nobody types this number anywhere — the QR code carries it — so defending it
-at the cost of the feature would be the wrong way round.
-
-Two consequences worth knowing. The **firewall rule is scoped to the executable rather than to a port**,
-because a rule naming one port would stop matching the moment the fallback fired, and re-approving it
-means a UAC prompt per launch. And the restart check compares the **requested** port against the setting,
-never the active one: after a fallback those two differ on purpose, and comparing the active port would
-restart the bridge for ever. Detecting "that port is unavailable" needs all three shapes the failure
-takes — Kestrel reports a plain collision as `AddressInUseException`, which derives from
-`InvalidOperationException` and so is missed entirely by a check for socket errors. That one was found by
-the test, not by reading.
-
-**The reaction to Settings is debounced** by 750 ms. The port is a spinner bound straight to the stored
-value, so raising it from 18091 to 18095 saves five times on the way; without the debounce each
-intermediate number tore the server down and bound it again — four pointless rebinds, four chances to
-lose a race with the operating system over a port still in `TIME_WAIT`, and a paired phone dropped in the
-middle. The timer's callback is wrapped, because an exception escaping a thread-pool timer ends the
-process.
-
-One rule decides when it may stop, in `StopIfUnneededAsync`: the setting does not ask it to stay up, no
-panel is open, no phone is paired. The panel holds it up with a scope (`HoldOpen`) rather than restating
-that rule, because three different things can want it stopped and each restatement is a chance to
-disagree with the others. Without watching the setting at all, the switch was write-only in the direction
-that matters: turning it *off* left a server listening on the network until the application was
-restarted.
-
-**The tile name is cached, not read on demand.** `DescribeState` runs on a socket thread and the name
-lives in an Avalonia view-model tree — the one place this class reached into the UI graph from the
-network. It is refreshed on the dispatcher whenever the dictation state changes and when a phone
-connects. A stale name costs a wrong caption for a fraction of a second; a torn read costs something
-nobody has bounded.
-
-**The pin is written on the UI thread**, even though it is learned on a Kestrel request thread. The
-settings graph is plain `Dictionary`, and the debounced save walks it from elsewhere: writing a key
-during that walk throws inside the save, on a thread-pool thread, at a moment nobody would connect to
-somebody having scanned a QR code. Every other writer of that file is already on the UI thread.
-
-**A generated certificate is valid for 397 days**, deliberately under Apple's 398-day ceiling. Safari
-refuses a TLS certificate valid for longer than that outright, rather than offering the "accept the risk"
-route this whole feature depends on, and Chrome follows the same rule; 825 days — the older CA/Browser
-Forum figure, and what this used at first — bought nothing and risked turning a warning the user can click
-through into a wall they cannot. The bridge reissues on a change of address anyway, so the shorter life
-costs nothing real.
-
-Certificates are disposed when the bridge stops. They hold key handles the operating system keeps until
-released, and restarting for a port change is an ordinary act. **The disposal is what matters, and it was
-measured rather than assumed**: twenty cycles in the bridge's own shape — load the PKCS#12 with
-`UserKeySet`, re-import through `ForServerUse`, dispose — left the count of files in
-`%APPDATA%\Microsoft\Crypto\Keys` exactly where it started (40 → 40). Twenty more with the handles
-abandoned to the garbage collector took it to 80 and back to 42 once finalizers ran. So there is no
-standing key-file leak to cache around; there is only a rule to keep following.
-
-### The firewall
-
-Windows raises its own "allow this app to communicate" prompt the first time a process listens on a
-non-loopback address, and **if the user dismisses it, Windows writes a block rule and never asks
-again**. The feature then fails for ever with no message anywhere. That, not the absence of an allow
-rule, is what `WindowsFirewallGuide` exists to undo: it removes every inbound rule pointing at this
-executable before adding one, because an existing block would win over anything added after it.
-
-The shell is launched by absolute path (`%SystemRoot%\System32\WindowsPowerShell1.0\powershell.exe`).
-This runs with `runas`, so resolving the name through `PATH` would be a way to get somebody else's binary
-elevated by a user who thought they were fixing a firewall rule.
-
-**Private and Domain, never Public.** A bridge is meant to be reachable from a phone on a network the
-user is actually on: their own Wi-Fi, or the office network of a domain-joined machine. Café and airport
-networks are exactly where a paired-device bridge should not be listening, and the pairing token is the
-second line of defence rather than a reason to skip the first. Domain was missing at first, and the
-consequence was worse than the rule not applying: the check at the end of the script asked only whether a
-*Private* network was active, so a domain-joined machine was told "Windows treats this network as Public"
-and sent to change a network category that a domain controller sets and the user cannot touch. **A
-diagnosis that is wrong costs more than none** — it sends somebody looking for a different fault
-entirely.
-
-**The verification is one string, used twice** (`WindowsFirewallGuide.Verification`). It ends the repair
-script and it *is* the read-only check the panel runs when it opens, because the repair's verdict and the
-panel's hint are read minutes apart by the same person looking at the same panel, and written twice they
-would disagree the first time either was edited. It asks, most decisive first: is there an enabled inbound
-**block** rule for this executable; is there an enabled inbound **allow** rule for it; does that rule's
-own profile set cover the network a phone would be on; and does group policy have
-`AllowLocalFirewallRules` set to False — which means a rule can be created, reported as created, and
-ignored, so it is named separately rather than reported as success. A failure to ask any of that is its
-own exit code: without one, a machine whose NetSecurity cmdlets do not work reported "no rule", and the
-repair it offered could not have worked either.
-
-Two of those questions were wrong at first, and both were found on a real machine rather than by reading.
-**Rules are looked up by program, never by name.** Asking for `DisplayName = 'mTiles phone bridge'` asks
-whether *this application* created a rule, when the question is whether anything lets mTiles in — and
-Windows' own "Allow access" prompt writes rules named after the program. A machine where the user had
-answered that prompt correctly was told "no rule allowing mTiles in" and offered a repair that deletes
-every inbound rule for the executable: destructive advice about a configuration that already worked.
-**And only networks that could carry a phone are asked about.** "Is any active profile Private?" is
-answered yes by a Tailscale adapter, a VPN or a Hyper-V switch, so a machine whose real Wi-Fi is Public
-was reported as fine — silence in exactly the case the check exists for. The filter is the default
-route, the same test `NetworkEndpointSource` uses to decide which addresses belong in a QR code: an
-adapter nothing routes through cannot carry a phone. It is a filter and not a requirement, so a machine
-with no default route at all still gets every profile considered rather than no answer. (`Get-NetConnectionProfile` calls a domain network `DomainAuthenticated` while
-`Get-NetFirewallProfile` calls it `Domain`, which is why the names are translated rather than passed
-through.)
-
-The check needs no elevation, so it runs when the panel opens rather than only after somebody has been
-through a UAC prompt — and **that is the point**: a missing rule, a block rule, a Public network and a
-policy that ignores local rules all look identical from the phone, as a page that will not load. The
-panel says which it is straight away, above the "nothing has connected yet" box rather than inside it,
-because those twenty seconds are twenty seconds of somebody holding a phone at a code that cannot work.
-A check that fails to run says nothing at all: it is a hint beside a working panel, and an error message
-about a hint is worse than a missing hint.
-
-The repair itself is offered, never silent — the UAC prompt is the consent — and cancelling it is
-reported as a decision rather than a failure.
-
-**Still scoped to the executable rather than to a port**, and the reasoning is unchanged (see above): the
-bridge does not always get the port it asked for, so a rule naming one would silently stop matching, and
-re-creating it costs a UAC prompt. The trade holds only while this executable has exactly one inbound
-listener — verified, not assumed: `DbHttpServer` binds `http://localhost:{port}/`, which is loopback and
-does not pass through the firewall at all. On Linux the guide hands over a command instead of running
-it: there is no desktop-wide consented-elevation prompt to invoke, and a GUI that shells out to `sudo`
-either finds no terminal to prompt in or teaches the user to grant root to whatever asked politely.
-
-It does, however, stop guessing *which* command. `systemctl is-active` needs no privileges, changes
-nothing and answers in milliseconds, so the panel names the firewall that is actually running — `ufw`
-or `firewalld` — and gives the command for that one. Offering both side by side asked the user to work
-out which firewall their own machine runs, and on the distributions where this bites they differ: Ubuntu
-leaves `ufw` inactive, Fedora and CachyOS enable `firewalld`, Omarchy configures `ufw` to deny inbound,
-SteamOS runs neither. The `firewalld` form is `--permanent` and reloaded, because `--add-port` alone
-lasts until the next reload — a phone that works today and not on Monday is the worst kind of
-instruction to have followed. When neither service is running the panel says **nothing**, rather than
-"no firewall is blocking this": that would be a claim about nftables rules nobody has looked at, in a
-panel whose other sentences are all things that were actually read.
+With the phone's own **Press Enter** off (the default) a dictated line is typed and not run; the explicit
+Enter key and the send button are the smaller, deliberate act and need no such consent.
 
 ### What this does to the privacy promise
 
-Recognition still runs on the machine mTiles is on, and nothing reaches a third party. What changed is
-that the audio crosses from one device you own to another, encrypted. Said plainly in the README rather
-than left for someone to discover.
+Recognition still runs on the machine mTiles is on. What changed is that audio and the text of your
+conversations cross from this machine to your phone and back — **through Tailscale's relays**, end-to-end
+encrypted with keys only the two devices hold; the relay sees that two keys talk, and how much, never what
+they say. Tailcat-link's key schedule has the shape of Noise IK without being it and has not been reviewed
+outside that project, which its own README says and so does ours.

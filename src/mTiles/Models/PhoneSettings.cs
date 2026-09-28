@@ -1,48 +1,42 @@
 namespace mTiles.Models;
 
-/// <summary>Dictating into a tile from a phone or another browser on the network.</summary>
+/// <summary>Reaching this application from a phone: dictating into a tile, and watching and answering
+/// the agents in it.</summary>
 public sealed class PhoneSettings
 {
+    /// <summary>The page a phone is sent to, the invitation code riding in its fragment.</summary>
+    /// <remarks>Hosted on GitHub Pages, built from <c>site/phone/</c> in this repository — see
+    /// <c>docs/adr/0006-phone-over-relays.md</c>. Not on any settings page: it exists so a developer can
+    /// point a build at a copy served from their own machine.</remarks>
+    public const string DefaultPageUrl = "https://b-y-t-e.github.io/mTiles/phone/";
+
     /// <summary>
-    /// Whether the bridge keeps listening once the QR panel is closed.
+    /// Whether the bridge stays connected to the relay once the QR panel is closed, even with no phone
+    /// paired yet.
     /// </summary>
     /// <remarks>
-    /// Off by default, and that default is the security posture rather than a preference. Every other
-    /// server in this application listens on loopback only; this one has to accept connections from the
-    /// network to be of any use, so it runs when the user has asked for it and not merely because the
-    /// application is open. With it off the panel still works — showing the QR code starts the bridge and
-    /// closing it stops it again, once no phone is still paired.
+    /// With a phone paired the bridge runs anyway — a paired phone that cannot reach the machine is the
+    /// feature not working — so what this adds is only the case of nobody paired. Off by default: a machine
+    /// that has never shown a QR code has no reason to hold a connection to Tailscale's relays open.
     /// </remarks>
     public bool Enabled { get; set; }
 
     /// <summary>
-    /// The port the bridge prefers. Zero means "whichever one is free".
+    /// Whether any phone was paired when the bridge last looked, which is what decides whether it
+    /// starts with the application.
     /// </summary>
-    /// <remarks>
-    /// A preference, not a demand — the bridge falls back to a free port when this one cannot be bound.
-    /// That is not defensive: on Windows the kernel reserves blocks of ports for Hyper-V, WSL and Docker
-    /// at boot, and a port inside one can never be bound however free it looks. 18091 landed inside such
-    /// a block on the first machine this ran on. Nobody types this number anywhere — the QR code carries
-    /// it — so defending it at the cost of the feature would be the wrong way round.
-    /// </remarks>
-    public int Port { get; set; } = 18091;
+    /// <remarks>Kept here rather than read out of the link's own file, because that file is the
+    /// library's compatibility surface and reading it means parsing a format that is not ours to rely
+    /// on. Written by the bridge only, never by the settings page.</remarks>
+    public bool HasPairedDevices { get; set; }
 
-    /// <summary>
-    /// The address a phone last reached this machine at, keyed by the kind of session it happened in.
-    /// </summary>
-    /// <remarks>
-    /// Keyed, rather than a single remembered winner, because one machine is used both ways: sitting at
-    /// it, the LAN address is the answer; connected to it over Remote Desktop, only a tunnel can reach the
-    /// phone in the user's hand. The machine is identical in both cases, so a single pin would have each
-    /// day's answer overwrite the other's, and the ranking would be wrong every time the user switched.
-    /// Keys are <c>SessionLocation</c> names; an unrecognised key is simply never matched.
-    /// </remarks>
-    public Dictionary<string, string> PinnedHosts
+    /// <summary>Where the phone page is. See <see cref="DefaultPageUrl"/>.</summary>
+    public string PageUrl
     {
-        get => _pinnedHosts;
-        set => _pinnedHosts = value ?? [];
+        get => _pageUrl;
+        set => _pageUrl = string.IsNullOrWhiteSpace(value) ? DefaultPageUrl : value.Trim();
     }
-    private Dictionary<string, string> _pinnedHosts = [];
+    private string _pageUrl = DefaultPageUrl;
 
     /// <summary>Whether transcription from a phone presses Enter, independently of the local setting.</summary>
     /// <remarks>
@@ -52,8 +46,6 @@ public sealed class PhoneSettings
     /// offering, and exactly why it is not the default. Running a command in a terminal from a device the
     /// user is not watching is not something to opt anybody into; the switch exists so they can choose it
     /// knowingly, for the gesture where it helps.
-    /// <para>An earlier version of this note argued that submitting was "the useful default there" while
-    /// leaving the default off. The note was wrong, not the default.</para>
     /// </remarks>
     public bool AutoSubmitEnter { get; set; }
 }

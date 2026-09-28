@@ -111,7 +111,7 @@ release. Never a manual `git push` or a hand-written version bump.
   **`AiModelChoice.FirstLoaded` is resolved at every launch and never written down.** Persisting the answer is the same as not having the sentinel: the point of it is that changing the model in LM Studio does not also mean changing it in mTiles. **A resolution that fails stops the launch and shows the sentence** (`TerminalTileViewModel.LaunchProblem`, refused by `TileLauncher`, drawn over the tile by `TerminalTileView`) rather than substituting one of ours: the rule is `AgentModelResolver`, asked by both agent tiles *and* by the Goal tile's run — it lived in the tile alone, so a goal on an instance asking for the first loaded model launched with no model at all while the environment still pointed at the local server, and a model named on an agent that cannot carry one was dropped without a word; the tile that started anyway looked like it had worked, and the only account of the model it was really running on was a line in `%APPDATA%/mTiles/logs`. **It also refuses an instance whose provider is gone or is one this agent cannot speak to** — the same question `AiAgentCatalog.IsAvailable` asks as a filter, said out loud, because the chooser and the Goal tile's list hide such an instance while a tile restored from a layout is handed its stored one without anybody asking: the one path where nobody is choosing is the one where a silent fall back to the CLI's own account and model would never be noticed. Discovery is **on demand, never on a timer** (a scheduled sweep of a corporate network looks like reconnaissance) and verifies **by protocol, not by port** — an open 11434 is not proof of Ollama. It will usually find nothing, and whatever shows it has to say so: Ollama binds `127.0.0.1` unless `OLLAMA_HOST=0.0.0.0`, LM Studio needs "Serve on Local Network". **Neither has any authentication**, so a reachable instance is open to everyone on that network. Both are configured on the Settings dialog's **AI** page, which is also the only thing that calls `TestAsync`, `ModelsAsync`, `NarrowEfforts` and `LocalProviderDiscovery` (see *Settings UI*)
 - `Services/WorkspaceAgentFiles.cs` — the files a workspace puts where its AI agents look (see *Agent-facing files* below), with `LegacyDatabaseSectionCleanup` beside it for what the writer it replaced left behind
 - `Services/AppPaths.cs` + `Services/WorkspacePaths.cs` — the two directories this application owns, and the one-time move each performs from the name it used before the rename. **Both fail soft**: a move that cannot be made leaves the old directory in use rather than presenting a first run, because the first run saves. `WorkspacePaths` is the one inside the user's repository, so its move shows up as a rename in their next `git status` — visible and reversible, which is the most it can be
-- `Services/Phone/` — dictation from a phone (see `docs/DICTATION.md` → *Dictating from a phone*): PhoneEndpoint/IPhoneEndpointSource with NetworkEndpointSource, TailscaleEndpointSource and MulticastDnsEndpointSource, PhoneEndpointRanker (pure — the one part whose behaviour is an opinion, so it is argued in a table test), PhoneEndpointDirectory, SessionLocationProbe, PhonePairing, PhoneCertificates, PhoneFirewall, PhoneAudioCapture + RoutedAudioCapture, PhoneBridgeServer (Kestrel — the only server here that faces the network), PhoneBridgeManager, PhoneKeys (the keys the page can press, and where they land), QrCodeImage, UiDispatcher
+- `Services/Phone/` — the phone (see *The phone* below and `docs/DICTATION.md` → *Dictating from a phone*): PhoneBridgeManager (the tailcat-link host, pairing, the push loop and dictation routing), PhoneProtocol (the wire, pure), PhoneWorkspaces (`IPhoneWorkspaces` — the one seam onto the view model tree), PhoneTiles (what any tile is to a phone, and whether it can be reached), `Remote/` (the DTOs and the pure projections — AgentChatProjection, GoalChatProjection, LayoutProjection), PhoneTileActions, PhoneAudioCapture + RoutedAudioCapture, PhoneKeys (the six keys' wire names and where they land), TraceLoggerFactory, QrCodeImage, UiDispatcher. The page itself is `site/phone/`
 - `Services/Speech/` — dictation (see `docs/DICTATION.md`): IAudioCapture/PortAudioCapture, AudioResampler, ISpeechToTextEngine with ParakeetSpeechEngine (+ParakeetVocabulary) and WhisperSpeechEngine, SpeechEngines (the one map from model kind to engine and to what it looks like on disk), SpeechModelCatalog, SpeechModelStore, TarGzExtractor, DictationService, TranscriptPostProcessor, DictationTextSink, HotkeyGesture, HotkeyCapture (what a keystroke means to something reading a new shortcut — shared by the Speech tab and the setup wizard, and pure, because it lived in view code where the "mark it handled only where it is taken" rule had no test), HotkeyAdvice, DesktopShortcuts/ShortcutSpelling/ShortcutOwner/WindowsShortcuts (who has already been given this shortcut — asked of KDE over its own D-Bus register, of GNOME through gsettings and of Hyprland through hyprctl, and on Windows read from a written-down table because it publishes no register at all; a shortcut the desktop has taken does not arrive here in the first place, and `Alt+Space`, the default, is taken on Plasma and on GNOME — but not on Windows, where the window receives it and `DefWindowProc` is what opens the window menu, so what the table lists is only what the window never sees. An owner says whether it can be given back, since the Start menu cannot), DictationHotkeyMachine, DictationHotkeys
 - `Services/Shells/` — **one class per shell**, keyed by a string id the way `TileKindIds` is: `IShellTerminal` (id, display name, icon, where to look for it, interactive/command/no-profile flags, quoting, and the shell's own `export`/`unset` syntax), the `ShellTerminal` base that composes those into `WithEnv` and refuses a name that is not a variable name, `PosixShellTerminal` with `BashTerminal`/`ZshTerminal`/`GitBashTerminal` under it, `FishTerminal` (not a POSIX shell — it escapes inside single quotes), `PowerShellTerminal`, `ShellInstallation` (a shell **and** where it was found — the two are separate so quoting is testable without a filesystem, and `CommandLineFor` is the old `ShellCommandLine`), and `ShellTerminalCatalog` (the registry, detection, and the one tolerant lookup that reads both an id and the display name older settings and layouts store).
   **`cmd` is not in the catalog, and that is a decision.** It cannot run what this application asks a shell to run: it does not parse its command line by the `CommandLineToArgvW` rules the PTY backend quotes with, runs only the first line of a multi-line command, and does not treat `;` as a separator — all measured, and the last of those silently reduced OpenCode's own two-command chain to a bare shell. It used to be offered and then swapped for PowerShell behind the user's back, which meant a shell that was neither the one they picked nor the one running their commands. A stored `CMD` now finds nothing and falls back to the default — and so does a `$SHELL` the old Unix detection offered (`nu`, `ksh`, `dash`), which is why `SettingsService.ReportUnknownDefaultShell` logs the name once — remembering in `ReportedUnknownShellName` that it has, so the warning does not return every launch — and **leaves the name in the file**: a name this build cannot match is also what a shell added by a newer version looks like after a Velopack rollback, so clearing it would let the older build settle the question for the newer one for good. `DropCustomShell` is the one that does clear, because a path to an arbitrary binary is an answer nothing here could ever honour.
@@ -143,7 +143,7 @@ release. Never a manual `git push` or a hand-written version bump.
   - Detaching from the visual tree does **not** end the session (only UI timers pause), so moving tiles between panes needs no bracketing.
   - It never launches on its own, and never twice at once: `RestartAsync(options, startupInput)` is what this app uses — it kills the live session, waits for it to be reported dead, starts the new one and types the startup script into it once *that* session is ready.
   - **A session has an identity.** `SessionId` and `SessionExitedEventArgs.SessionId` are how a relaunch-on-exit tells its own session from the next one. Never infer it from elapsed time.
-  - API used here: `RestartAsync`/`Dispose`/`IsRunning`/`IsDisposed`/`SessionId`, `Exited`, `WhenSessionEndedAsync(sessionId)` (the launch chain's one wait: it carries `ExitCode` — `int?`, null when there is none — and `Reason`, so "the command failed" is never confused with "we could not tell"), `Copy`/`ClearSelection`/`HasSelection`/`SelectionChanged`, `Palette`, `ScrollbackCapacity`, `RedrawShellOnResize`, `ForwardCtrlVWhenClipboardHasNoText`, `Title`/`TitleChanged`, `Progress`/`ProgressChanged` and `NotificationReceived` (OSC 9, since 0.3.2 — see *Tile activity*), and `TimeProvider` (0.4.1: the clock a session's `Lifetime` is measured on — the tests hand it a `ManualClock` so the launch chain's two-minute threshold is an `Advance` rather than a wait). The startup script is handed to `RestartAsync` rather than typed with `SendText`, and the chain waits on `WhenSessionEndedAsync` rather than `WhenNotRunningAsync` — neither is called from here any more. **`Kill()` is deliberately unused**: it only asks the child to die, and the exit is reported when it actually does, so anything that kills and then starts races that report. `RestartAsync` sequences kill → wait → start and serialises overlapping restarts; `Dispose` ends the tile for good. Note this does *not* avoid the stall — `RestartAsync` calls `Kill()` itself and it blocks the UI thread for as long as the child takes (up to 2s). That is Open risk #3 in the library's ROADMAP, not something the host can fix.
+  - API used here: `RestartAsync`/`Dispose`/`IsRunning`/`IsDisposed`/`SessionId`, `Exited`, `WhenSessionEndedAsync(sessionId)` (the launch chain's one wait: it carries `ExitCode` — `int?`, null when there is none — and `Reason`, so "the command failed" is never confused with "we could not tell"), `Copy`/`ClearSelection`/`HasSelection`/`SelectionChanged`, `Palette`, `ScrollbackCapacity`, `RedrawShellOnResize`, `ForwardCtrlVWhenClipboardHasNoText`, `Title`/`TitleChanged`, `Progress`/`ProgressChanged` and `NotificationReceived` (OSC 9, since 0.3.2 — see *Tile activity*), and `ReadScreenText`/`ScreenVersion` (0.4.2: the screen as plain text and a counter that moves with it — what a paired phone is shown of a terminal), and `TimeProvider` (0.4.1: the clock a session's `Lifetime` is measured on — the tests hand it a `ManualClock` so the launch chain's two-minute threshold is an `Advance` rather than a wait). The startup script is handed to `RestartAsync` rather than typed with `SendText`, and the chain waits on `WhenSessionEndedAsync` rather than `WhenNotRunningAsync` — neither is called from here any more. **`Kill()` is deliberately unused**: it only asks the child to die, and the exit is reported when it actually does, so anything that kills and then starts races that report. `RestartAsync` sequences kill → wait → start and serialises overlapping restarts; `Dispose` ends the tile for good. Note this does *not* avoid the stall — `RestartAsync` calls `Kill()` itself and it blocks the UI thread for as long as the child takes (up to 2s). That is Open risk #3 in the library's ROADMAP, not something the host can fix.
   - Ctrl+C copies when there is a selection and sends SIGINT otherwise; Ctrl+V / Ctrl+Shift+V / Shift+Insert paste clipboard **text** (filtered). Keys go out as win32 INPUT_RECORDs whenever the child enabled `?9001`.
   - Ships the open-source console host (`conpty/<arch>/OpenConsole.exe`), which is what fixed opencode taking the shell down with it. `Terminal.Pty` delivers it through `buildTransitive`, so it copies to the app's output automatically — **verified in `bin/`, not assumed**. The files must stay next to the app: without them the session silently falls back to the in-box `conhost.exe`.
 - **The dictation stack** (see Dictation below) — three packages, all of which carry native binaries:
@@ -402,13 +402,14 @@ which of the two they just cancelled.
 ## Tiles
 
 Every tile's content implements **`ITile`** (`KindId`, plus change notification and disposal — nothing
-else), and announces what it can do by which of seven interfaces extending it it implements: `IBusyTile`
+else), and announces what it can do by which of eight interfaces extending it it implements: `IBusyTile`
 (the workspace row's light — a `TileActivity`, not a flag), `IFileContent` (the file follows the tile's name), `ITileActions`
 (the header's buttons and what a paired phone may press), `ITextInputTile` (where a dictated sentence and
 an Enter land), `ICustomBackgroundTile` (the terminal's inset and its own background colour), `IProcessTile` (the process
 it started, which is what the workspace row's memory reading is measured from), `IDescribedTile` (what
 the tile is *running*, beside its name in the header — an agent tile of either kind answers with its instance and model,
-and a kind with nothing to add simply does not implement it). **One class
+and a kind with nothing to add simply does not implement it), `IRemoteViewTile` (what a paired phone
+shows when it zooms into the tile, and what the phone may ask of it — the Agent, Goal and terminal tiles). **One class
 per kind** — `Services/Tiles/*TileKind.cs` — says what it is called, what it looks like, how it is built
 from saved state and what it writes down; **one line per kind** in `App.BuildTileCatalog` registers it
 together with the view that draws it, and `LeafTileView` resolves that view by a dictionary lookup on
@@ -763,9 +764,8 @@ Settings dialog as a modal overlay with responsive sizing (50% window width / 80
   connections with their own **Export/Import** on the heading row (`ManualConnectionsPortability`)
 - **Speech** — dictation on/off, shortcut (captured by pressing it), push-to-talk vs toggle, microphone,
   language, auto-Enter, vocabulary, and the model list with download/delete and progress; plus a **Phone**
-  section (keep the bridge running, preferred port, and the phone's own auto-Enter). Those last two are
-  the only settings on this tab that restart a running service, which is why the bridge debounces what it
-  hears from here instead of acting on every intermediate value the spinner produces
+  section (keep the link connected, and the phone's own auto-Enter). The bridge reacts only to the first
+  of those changing — it starts or stops the link — and reads auto-Enter afresh at every sentence
 
 `SettingsViewModel.SelectedTab` controls tab visibility, and the pages are named in `ViewModels/SettingsTabs.cs` (`General`, `Ai`, `Database`, `Speech`) — used by the view model, by the database tile's "open my settings" button, and from XAML through `{x:Static vm:SettingsTabs.…}`, which replaced the `Zero`…`Four` boxed-int resources. Constants rather than an enum: the selection is bound as an `int` to command parameters in two AXAML files, and the numbers were the problem, not the type. The Database tab has its own sub-tabs (`DbSubTabs`: `Config`, `Discovered`, `Manual` — named for the
 reason `SettingsTabs` is, and three rather than two because a scan's output and something the user typed
@@ -1721,65 +1721,58 @@ threading rules, the download and unpacking, the shortcut's state machine, the m
 Polish, and the reasoning behind each. Read it before changing anything under `Services/Speech/`: most
 of what is written there is a bug that has already been paid for once.
 
-## Dictation from a phone
+## The phone: following agents, and dictating, from anywhere
 
-Speak into a tile from a phone on your network, or from a browser on the machine in front of you — which
-is what makes dictation usable over Remote Desktop, where the microphone is next to *you* and mTiles is
-on the far machine. A QR button beside Settings, in the workspaces panel, opens a panel with the codes.
+A paired phone is a remote for the whole window: every workspace, each one's layout drawn to scale, and
+any tile zoomed into — an Agent or a Goal tile's conversation as it happens, with its approvals, questions
+and plan to answer; a terminal's screen as text with the arrows, Escape and Enter; typing; hold-to-talk
+dictation into that tile; and whatever actions the tile offers a phone. A QR button beside Settings, in
+the workspaces panel, pairs one.
 
-The entry point is **window-level, not per-tile**, and that is a correction rather than a preference: it
-began in the tile header beside the microphone, where it read as "dictate into *this* tile" — a promise
-the feature does not make and cannot. The phone sends to whichever tile is active when you speak, exactly
-as the keyboard shortcut does.
+**Nothing listens to the network.** Both ends dial out to Tailscale's public DERP relays through
+[tailcat-link](https://github.com/b-y-t-e/tailcat-link) (`Tailcat.Link` on NuGet; its browser client is
+vendored into `site/phone/vendor/`), which pass end-to-end encrypted bytes between two public keys. No
+port, no certificate, no firewall rule, and the phone need not share a network with the machine. This
+replaced a Kestrel HTTPS server, self-signed and Tailscale certificates, a Windows firewall repair and an
+address ranker — all of which existed only because a port had to be opened and then found. ADR
+[0006](docs/adr/0006-phone-over-relays.md) is the reasoning.
 
-The page also carries **Enter, the four arrows and Escape** (`PhoneKeys`, one `{"type":"key"}` message on
-the same socket), because dictating a command is only half of driving an agent from the sofa — the other
-half is the prompt it stops on, and backing out of the screens it puts up. They route by the transcript's
-own rule (focused text control first, then the active tile's terminal) so that the Enter lands where the
-sentence did, and they are delivered as a synthesised `KeyDown` rather than bytes: what Up means on the
-wire depends on DECCKM and win32-input-mode, both of which the terminal control owns and neither of which
-it exposes. Gated on nothing dictation is gated on — a machine with no model and no microphone can still
-be driven this way. That **is** a new
-grant, and the note in `docs/DICTATION.md` says so rather than the reverse: a paired device could always
-type a line into the terminal, but with the phone's auto-Enter off (the default) it could not run one.
-Deliberately not put behind that setting — it governs mTiles pressing Enter *for* the user, sight unseen,
-which is the larger act, and the smaller explicit one must not need consent to it. The boundary is
-pairing, as it always was.
+What is worth knowing before touching `Services/Phone/` or `site/phone/`:
 
-Three things are worth knowing before touching `Services/Phone/`:
-
+- **The page is a static site on GitHub Pages** (`site/phone/`, `.github/workflows/pages.yml`,
+  `PhoneSettings.PageUrl` — not on any settings page; `node site/phone/serve.mjs` serves a local copy).
+  A browser gives the microphone and WebCrypto only to a secure origin, and with no port mTiles cannot
+  serve one. The **invitation code rides in the URL fragment**, which never reaches the server; the page
+  pairs and takes it out of the address bar. The DERP map must be same-origin, so the workflow copies it
+  in on every deploy and weekly. **Pages has to be enabled in the repository (source: GitHub Actions).**
+- **An injected script on that origin is a shell on the paired machine**, since the pairing lives in its
+  IndexedDB. So: a strict CSP in `index.html`, nothing loaded from anywhere else (tweetnacl and the font
+  are vendored), and **never `innerHTML`** — `markdown.js` parses into plain objects and builds elements
+  through `textContent`, links only for http/https. `site/phone/test/` pins it; CI runs it with `node --test`.
+- **A phone names the tile it means** (`tileId` on every request) and what each phone watches is pushed
+  to it (`PhoneProtocol`: requests answered `{ok,…}`, pushes as notifications, `hello` exchanging a
+  protocol version because page and application ship separately). Pushes are **sampled, not evented** —
+  four times a second while a phone is connected, only for a tile whose `IRemoteViewTile.RemoteVersion`
+  moved, and never a message identical to the last one sent.
+- **What a tile shows is the tile's own answer** (`ViewModels/IRemoteViewTile.cs`, see `docs/TILES.md`):
+  the Agent tile projects the `ConversationState` its transcript draws from (`AgentChatProjection`), the
+  Goal tile its messages and the block it waits on (`GoalTileViewModel.Remote.cs`), a terminal its screen
+  as text (`TerminalControl.ReadScreenText`, Terminal.Avalonia 0.4.2 — the last frame, not the stream that
+  drew it). Commands go through the tile's own commands and are checked against what it waits on *now*.
+  `PhoneTileActions` is still the one filter for what a phone is shown and may press: nothing destructive.
+- **Audio is one channel per utterance** — a JSON header (tile, sample rate), 16-bit PCM, a one-byte
+  zero frame to cancel, and the channel closing on purpose to end the sentence; ended with the session
+  it is a cancel. Ordered within itself, which a request followed by frames would not be.
 - **`IAudioCapture` is the seam.** `PhoneAudioCapture` implements it and `RoutedAudioCapture` picks
   between it and the microphone per recording, so `DictationService` gained a second input without
-  gaining a line of code. Handles are tagged with the backend that made them, because `Detach`/`Finish`
-  are split and a new recording can start on the other backend mid-close.
-- **TLS is not optional** — a browser hands out no microphone outside a secure context. That is why this
-  one server is Kestrel rather than `HttpListener` (which needs `netsh http sslcert` and administrator
-  rights for HTTPS), and why Tailscale is the recommended path: its MagicDNS name gets a real
-  certificate, while a LAN address can only ever have a self-signed one and a warning to click through.
-- **The firewall fails silently, so the panel reads it rather than guessing.** `PhoneFirewall` holds one
-  verification string used by both the elevated repair and an unelevated check the panel runs when it
-  opens: a block rule Windows wrote when its own prompt was dismissed, no allow rule *for this program*
-  (never by rule name — Windows' prompt names rules after the program, and asking by name called a
-  working machine broken and offered to delete its rules), a rule whose profiles do not cover the network
-  a phone would be on (filtered by default route, or a Tailscale/Hyper-V adapter answers for the real
-  Wi-Fi), group policy ignoring local rules, and "could not ask" as its own answer. On Linux nothing is
-  opened — there is no elevation prompt worth invoking — but `systemctl is-active` names which firewall
-  is running so the panel gives one command instead of two guesses.
-- **The QR code holds one URL and the machine has half a dozen addresses.** `PhoneEndpointRanker` is
-  pure and decides which, from what worked last time (measured, so it outranks everything), whether the
-  session is console or RDP (`SM_REMOTESESSION` — the phone is next to the *user*), and whether the
-  adapter has a default route (which alone sorts real network cards from Hyper-V/WSL/Docker). The pin is
-  **per session location**, because one machine gets used both locally and remotely and a single
-  remembered winner would be wrong every time the user switched. Both audiences are always on screen;
-  the session only decides the order.
+  gaining a line of code.
+- **The link runs when a phone is paired** (`PhoneSettings.HasPairedDevices`, written by the bridge),
+  when *Keep connected* is on, or while the panel is open — a machine that never paired one never dials a
+  relay. At most four devices; a code is single use and lives five minutes; Unpair is `ForgetPeerAsync`, and a phone can log itself out (`unpair`, answered first and forgotten a second later, since forgetting drops the session the answer travels on).
+  The end-to-end test runs over `Tailcat.TestSupport`'s in-memory relay (`PhoneLinkTests`);
+  `PhoneLivePageTests` (opt-in, `MTILES_LIVE_PHONE`) hosts over the real relays for a browser to drive.
 
-What is protected is the **keyboard**, not the audio: whoever reaches the bridge can type into the
-terminal. Hence a short-lived single-use pairing token in the QR code, exchanged for a session token
-that never appears anywhere visible. The bridge is off by default and, unless Settings says otherwise,
-listens only while the panel is open or a phone is paired.
-
-**Everything else is in [`docs/DICTATION.md`](docs/DICTATION.md) → *Dictating from a phone***, including
-the firewall's silent-block trap, the certificate lifecycle and the wire format.
+**Everything else is in [`docs/DICTATION.md`](docs/DICTATION.md) → *Dictating from a phone***.
 
 ## Restart shell
 
@@ -1886,7 +1879,7 @@ this application, named by process id, or one that has not finished exiting.
   (`UsageSnapshots`), so a restart during a 429 neither asks again nor loses the card. A restored
   reading is always stamped with its age (`AiUsageReport.HeldOver`). Owner-only, like `history.json`
 - `models/` — downloaded speech-to-text models (hundreds of MB each; `.partial` while downloading)
-- `phone/` — the phone bridge's TLS material and its paired devices. `bridge.pfx` **contains a private key**; kept rather than regenerated per launch, because a new certificate every launch means a new browser warning every launch, and reissued when the machine's set of addresses changes (a certificate is only accepted for a host in its SANs). `sessions.json` holds SHA-256 of each paired device's token — never the token, so the file records *who* is paired without being usable to authenticate. Shutting the application down does not clear it; turning the bridge off does
+- `phone/` — `mtiles-phone.link.json`: the phone link's identity and its paired devices, written by tailcat-link — the private key DPAPI-protected on Windows, the file `0600` elsewhere. Shutting the application down does not unpair anything; Unpair in the panel does. The Kestrel bridge's `bridge.pfx` (a private key) and `sessions.json` are deleted on first start
 - Auto-save with debounce
 
 ## What is not built yet
@@ -1927,6 +1920,9 @@ Recorded so far:
   and the old default: `balanced` now means a review at medium, and the deep review keeps its levels
   under the name `careful`. The word moved, so a stored `Balanced` is migrated onto `careful` under a
   key of its own rather than silently meaning something cheaper.
+- [0006](docs/adr/0006-phone-over-relays.md) — the phone reaches mTiles through Tailscale's public
+  relays (tailcat-link) instead of a Kestrel server on this machine: no port, no certificate, no firewall;
+  the page moves to GitHub Pages with the pairing code in the URL fragment.
 
 ## Conventions
 

@@ -9,9 +9,10 @@ using CommunityToolkit.Mvvm.Input;
 using mTiles.Models;
 using mTiles.Services;
 
+using mTiles.Services.Phone.Remote;
 namespace mTiles.ViewModels;
 
-public partial class GitTileViewModel : ObservableObject, ITileActions
+public partial class GitTileViewModel : ObservableObject, ITileActions, IRemotePreviewTile
 {
     /// <inheritdoc />
     public string KindId => TileKindIds.Git;
@@ -147,6 +148,19 @@ public partial class GitTileViewModel : ObservableObject, ITileActions
     private Thickness _itemPadding = new(2, 1);
 
     public ObservableCollection<GitFileChange> Changes { get; } = [];
+
+    /// <inheritdoc />
+    /// <remarks>The branch and what is waiting on it — uncommitted files, unpushed commits — which is what
+    /// a glance at a git tile is for.</remarks>
+    public TilePreview? PreviewForRemote()
+    {
+        if (!IsGitRepo) return new TilePreview("Not a repository");
+        var parts = new List<string>(3);
+        if (BranchName.Length > 0) parts.Add(BranchName);
+        parts.Add(Changes.Count switch { 0 => "clean", 1 => "1 change", var n => $"{n} changes" });
+        if (UnpushedCount > 0) parts.Add($"{UnpushedCount} to push");
+        return new TilePreview(string.Join(" · ", parts));
+    }
     public ObservableCollection<CommitLogEntry> CommitLog { get; } = [];
     public ObservableCollection<string> CommitSuggestions { get; } = [];
 

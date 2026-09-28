@@ -466,6 +466,7 @@ public sealed class SettingsService
     public void Replace(AppSettings settings)
     {
         KeepExistingSecrets(settings);
+        KeepThisMachinesPhoneLink(settings);
         Settings = settings;
         // The same two steps the constructor runs, for the same reason: an imported file can be older
         // than this build, or hand-written. Without them an agent this build has and the file does not
@@ -490,6 +491,16 @@ public sealed class SettingsService
             if (secret.Get().Length == 0 && known.TryGetValue(secret.Key, out var value))
                 secret.Set(value);
         }
+    }
+
+    /// <summary>Keeps the phone link's two facts about this machine across an import.</summary>
+    /// <remarks>Whether a phone is paired here is not something another machine's file can know, and
+    /// the page address is where a pairing code is sent: taken from an imported file it would hand the
+    /// invitation — and with it the keyboard of every terminal — to whatever page that file named.</remarks>
+    private void KeepThisMachinesPhoneLink(AppSettings incoming)
+    {
+        incoming.Phone.PageUrl = Settings.Phone.PageUrl;
+        incoming.Phone.HasPairedDevices = Settings.Phone.HasPairedDevices;
     }
 
     public void NotifyChanged()

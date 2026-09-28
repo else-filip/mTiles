@@ -7,13 +7,14 @@ using CommunityToolkit.Mvvm.Input;
 using mTiles.Models;
 using mTiles.Services;
 using mTiles.Services.Activity;
+using mTiles.Services.Phone.Remote;
 using mTiles.Services.Shells;
 using mTiles.Services.Speech;
 
 namespace mTiles.ViewModels;
 
 public partial class TerminalTileViewModel : ObservableObject, IBusyTile, ICustomBackgroundTile,
-    ITileActions, ITextInputTile, IProcessTile, IMaximizableTile
+    ITileActions, ITextInputTile, IProcessTile, IMaximizableTile, IRemoteViewTile, IRemotePreviewTile
 {
     /// <inheritdoc />
     /// <remarks>Virtual for the one kind that is this tile with a different source of scripts — see
@@ -446,6 +447,66 @@ public partial class TerminalTileViewModel : ObservableObject, IBusyTile, ICusto
         TileKeyPress.At(terminal, key);
         return true;
     }
+
+    /// <summary>How many lines of history a phone is sent above the screen itself.</summary>
+    /// <remarks>Enough to read what a command printed before it scrolled off, and no more: the whole of
+    /// it goes out again every time the screen moves.</remarks>
+    internal const int RemoteScrollbackLines = 120;
+
+    /// <inheritdoc />
+    /// <remarks>Everything <see cref="DescribeForRemote"/> reads: the screen's own counter, the activity,
+    /// whether the shell is alive, the title and the detail — a shell that exits without the screen
+    /// moving must still take the composer away on the phone.</remarks>
+    public long RemoteVersion =>
+        ((long)HashCode.Combine(Activity, LiveTerminal is not null,
+            (CachedControl as Terminal.Avalonia.TerminalControl)?.Title, RemoteDetail) << 32)
+        ^ ((CachedControl as Terminal.Avalonia.TerminalControl)?.ScreenVersion ?? 0);
+
+    /// <inheritdoc />
+    /// <remarks>The last frame as text — what is on the screen, not the stream that drew it — which is
+    /// the only reading of a full-screen agent that makes sense anywhere but this grid.</remarks>
+    public RemoteTileBody DescribeForRemote()
+    {
+        var terminal = CachedControl as Terminal.Avalonia.TerminalControl;
+        var live = LiveTerminal is not null;
+        var title = terminal?.Title is { Length: > 0 } t ? t : null;
+
+        return new RemoteTileBody(
+            "terminal",
+            new RemoteStatus(
+                RemoteActivity.Of(Activity),
+                live ? title : "The shell in this tile is not running.",
+                RemoteDetail),
+            Screen: new RemoteScreen(terminal?.ReadScreenText(RemoteScrollbackLines) ?? [], title),
+            Composer: new RemoteComposer(live, live ? "Type into the terminal" : "Not running", Keys: true));
+    }
+
+    /// <inheritdoc />
+    /// <remarks>The last line of the screen that says anything — for a shell, the command running or what
+    /// it last printed.</remarks>
+    public TilePreview? PreviewForRemote()
+    {
+        if (LiveTerminal is null) return new TilePreview("Not running");
+        return CachedControl is Terminal.Avalonia.TerminalControl terminal
+            ? new TilePreview(PreviewLine(terminal), ContextGauge?.UsedPercent)
+            : null;
+    }
+
+    /// <summary>The line a phone's card shows for this tile. A shell's is the last line on its screen.</summary>
+    protected virtual string? PreviewLine(Terminal.Avalonia.TerminalControl terminal) =>
+        TilePreviews.LastLine(terminal.ReadScreenText(0));
+
+    /// <summary>What the phone says this tile runs on, beside its activity. A shell says nothing; an
+    /// agent tile names its instance.</summary>
+    protected virtual string? RemoteDetail => null;
+
+    /// <inheritdoc />
+    public Task<string?> HandleRemoteAsync(RemoteTileCommand command) => Task.FromResult(command switch
+    {
+        RemoteSendText send => TrySendText(send.Text, send.Submit) ? null : "The shell in this tile is not running.",
+        RemoteKey key => TryPressKey(key.Key) ? null : "The shell in this tile is not running.",
+        _ => "A terminal cannot do that from a phone.",
+    });
 
     /// <summary>This tile's terminal, when there is one and its shell is still running.</summary>
     /// <remarks>A dead terminal is refused rather than written to — text sent to a shell that has

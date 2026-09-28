@@ -2,6 +2,7 @@
 using Avalonia.Threading;
 using mTiles.Models;
 using mTiles.Services;
+using mTiles.Services.Phone.Remote;
 using mTiles.Services.Activity;
 using mTiles.Services.Agents;
 using mTiles.Services.Providers;
@@ -492,6 +493,15 @@ public sealed class TerminalAgentTileViewModel : TerminalTileViewModel, IDescrib
             return model.Length > 0 ? $"{name} · {model}" : name;
         }
     }
+
+    /// <inheritdoc />
+    protected override string? RemoteDetail => HeaderNote;
+
+    /// <inheritdoc />
+    /// <remarks>The title before the screen: a TUI's last line is its own footer, while the title is where
+    /// Claude Code and agy say what they are doing.</remarks>
+    protected override string? PreviewLine(Terminal.Avalonia.TerminalControl terminal) =>
+        TilePreviews.OneLine(terminal.Title) ?? base.PreviewLine(terminal);
 
     /// <summary>The part of a model id that tells one model from another.</summary>
     /// <remarks>The sentinel is not a name and never reaches here as one — but it can be the stored

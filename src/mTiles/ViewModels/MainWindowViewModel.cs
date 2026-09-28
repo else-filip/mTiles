@@ -40,15 +40,11 @@ public partial class MainWindowViewModel : ObservableObject
     /// Whether to offer the QR button at all.
     /// </summary>
     /// <remarks>
-    /// Tied to dictation, because that is what it is a way of doing. The bridge is built unconditionally
-    /// — it opens nothing until somebody asks — so asking only whether it exists meant the button was
-    /// always there, including for somebody who had turned dictation off and would find a panel offering
-    /// to set up a microphone they had just declined.
-    /// <para>Deliberately not conditioned on a model being downloaded: the panel is also where the
-    /// feature is discovered, and hiding the way in until it is fully set up leaves nothing to find.</para>
+    /// No longer tied to dictation: a paired phone follows and answers the agents in every workspace, which
+    /// is worth having with no microphone set up at all. The page offers the microphone only where this
+    /// machine can transcribe.
     /// </remarks>
-    public bool HasPhoneBridge =>
-        PhoneBridge is not null && _settingsService.Settings.Speech.Enabled;
+    public bool HasPhoneBridge => PhoneBridge is not null;
 
     /// <summary>
     /// Opens the QR panel. Wired from the view, which is the only thing holding a window to parent it to.
@@ -454,6 +450,23 @@ public partial class MainWindowViewModel : ObservableObject
 
     private WorkspaceItemViewModel? FindRow(string workspaceId) =>
         _workspacesPanel.Workspaces.FirstOrDefault(w => w.Id == workspaceId);
+
+    /// <summary>The workspaces whose tiles exist in this session, by id — what a paired phone can see
+    /// the layout of without moving the desktop.</summary>
+    internal IReadOnlyDictionary<string, WorkspaceViewModel> LoadedWorkspaces => _workspaceCache;
+
+    /// <summary>
+    /// Opens a workspace the way clicking its row does, which is the only way one gets loaded.
+    /// </summary>
+    /// <returns>False when there is no such workspace.</returns>
+    /// <remarks>A phone asks for this only for a workspace that is not loaded yet: looking at one that is
+    /// does not move the desktop, and this does, so it is said on the phone before it is asked.</remarks>
+    internal bool OpenWorkspace(string workspaceId)
+    {
+        if (FindRow(workspaceId) is not { } row) return false;
+        WorkspacesPanel.SelectedWorkspace = row;
+        return true;
+    }
 
     /// <summary>Gives a workspace's memory back without giving up the workspace.</summary>
     /// <remarks>

@@ -44,11 +44,14 @@ per account, one bar per window.
 **Query your databases, safely.** Any agent can query SQL Server or PostgreSQL through a local bridge —
 no password exposed, writes blocked by default.
 
-**Dictate, even by phone.** Speak instead of typing — from your keyboard, or from your phone as a
-microphone.
+**Your agents in your pocket.** Pair a phone once with a QR code and follow every workspace from it:
+the layout drawn to scale, any tile zoomed into, an agent's conversation as it happens — answer its
+questions and approvals, type or dictate into it, press its keys. No port is opened: both ends connect
+out to a relay, so it works from anywhere. **And dictate** — speak instead of typing, from the keyboard
+or the phone.
 
 <p align="center">
-  <img src="assets/phone-dictation.png" alt="The page mTiles serves to a paired phone: a hold-to-talk button, arrow keys, Esc and Enter, and the name of the tile the speech will land in" width="290">
+  <img src="assets/phone-dictation.png" alt="The phone page: an agent's conversation zoomed into from the workspace layout, with its pending approval and a dock to type, dictate and press keys" width="290">
 </p>
 
 **The rest.** Git, Note, Todo and Terminal tiles too. Any tile can change kind in place.
@@ -93,13 +96,6 @@ entirely:
 ./mTiles-linux-x86_64.AppImage --appimage-extract-and-run
 ```
 
-**A hole in the firewall, if you dictate from a phone.** mTiles opens one on Windows, with your consent;
-on Linux it only tells you which command to run, because there is no desktop-wide elevation prompt worth
-invoking and a GUI that shells out to `sudo` teaches the wrong habit. The phone panel names the firewall
-it finds running (`ufw` or `firewalld`) and the command for that one. Distributions differ: Ubuntu leaves
-`ufw` inactive, Fedora and CachyOS enable `firewalld`, Omarchy configures `ufw` to deny inbound, and
-SteamOS runs neither.
-
 Also worth knowing: Avalonia is an X11 application, so on Wayland desktops (Hyprland, KDE) it runs
 through **XWayland**; and dictation needs ALSA (`libasound.so.2`, provided by `alsa-lib`/`pipewire-alsa`)
 for the microphone — the phone bridge does not, since that audio arrives over the network.
@@ -127,9 +123,8 @@ Not promises with dates — the things known to be missing or wrong, roughly in 
 - **Codex's session is worked out rather than told, and it can be wrong.** codex names its own conversation and never says what it chose, so mTiles finds the rollout file it left behind: the newest one started since this tile did, recording this tile's working directory, and not already held by another open tile. Two codex tiles started in the same second in the same workspace can still, in principle, take each other's — in which case one of them resumes the wrong conversation on the next launch. agy is asked outright and has no such ambiguity.
 - **OpenCode's session file is an undocumented format.** Resume works by handing `opencode import` a small JSON document mTiles writes — opencode's own *export* format, not an API, measured against **1.18.14**. If a future opencode changes it, the import fails, the resume after it finds no session, and the tile falls through to a plain shell: history lost, tile intact. `OpenCodeSessionTests` is what turns that into a failing build rather than a surprise.
 
-- **Dictating from a phone on a LAN means accepting a certificate warning once.** A browser hands out no microphone outside a secure context, and no public authority will ever certify `192.168.1.20`, so the bridge serves a certificate it signed itself and the phone objects the first time. Accept it and it is remembered — but only for the addresses that certificate names: joining a network this machine has not been on before forces a new certificate, and the phone asks again. mTiles carries the previous names forward, so the set converges and a network you have used before does not ask twice. The exception is **Tailscale**, whose MagicDNS name gets a real certificate — which is why it is the recommended path for remote work, and the only one that reaches a phone that is not on this machine's own network at all.
-- **The phone bridge does not always get the port you configured.** On Windows the kernel reserves blocks of ports for Hyper-V, WSL and Docker at boot, and a port inside one can never be bound however free it looks — `netstat` blames PID 4, the kernel. The default 18091 landed inside such a block on the first machine it ran on. The bridge falls back to a free port and the panel says which; nothing you type depends on the number, because the QR code carries it.
-- **The promise that audio never leaves the machine now has an exception you opt into.** Dictating from a phone means the audio crosses from your phone to your computer — encrypted, and to a device you own. Recognition still runs on the machine mTiles is on; nothing reaches a third party. Dictating from the local microphone is unchanged.
+- **A paired phone reaches mTiles through Tailscale's public relays.** Both ends connect out, so nothing on your computer listens to the network; the relay passes end-to-end encrypted bytes it cannot read, and sees only that two keys talk. That includes your dictated audio and your agents' conversations while the phone is watching them. The encryption is [tailcat-link](https://github.com/b-y-t-e/tailcat-link)'s, whose design has not been reviewed outside that project. Recognition still runs on the machine mTiles is on; dictating from the local microphone is unchanged.
+- **The phone page is hosted on GitHub Pages**, because a browser gives the microphone only to an https page and mTiles no longer serves one. The pairing code rides in the link's `#fragment`, which never reaches GitHub. Anything able to run script on that page could use the pairing, so it loads nothing from anywhere else and never renders an agent's text as HTML.
 
 **Planned**
 

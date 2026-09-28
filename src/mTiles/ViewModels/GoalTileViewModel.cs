@@ -33,7 +33,7 @@ namespace mTiles.ViewModels;
 /// </remarks>
 public partial class GoalTileViewModel
     : ObservableObject, IBusyTile, ITileActions, IProcessTile, IActivatableTile, IMaximizableTile,
-    INewConversationTile
+    INewConversationTile, IRemoteViewTile, IRemotePreviewTile
 {
     /// <inheritdoc />
     public string KindId => TileKindIds.Goal;
@@ -1213,6 +1213,7 @@ public partial class GoalTileViewModel
         // two orders is where that stops being true without anybody noticing.
         _store = NewStore();
         WatchQuestions();
+        WatchForRemote();
 
         // The editor fills itself from the criteria in its own constructor, and on this path there is
         // nothing to load afterwards. The other constructor reloads because LoadState has replaced the
@@ -1239,6 +1240,7 @@ public partial class GoalTileViewModel
         FileMentions = NewFileMentions();
         _store = NewStore();
         WatchQuestions();
+        WatchForRemote();
         Criteria = NewCriteriaEditor();
 
         DetectAgents();

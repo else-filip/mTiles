@@ -1,4 +1,4 @@
-using mTiles.Services.Phone;
+﻿using mTiles.Services.Phone;
 using mTiles.Services.Speech;
 using Xunit;
 
@@ -123,13 +123,6 @@ internal sealed class InlineUiDispatcher : IUiDispatcher
 {
     public void Post(Action action) => action();
     public Task<T> InvokeAsync<T>(Func<T> work) => Task.FromResult(work());
-}
-
-/// <summary>Keeps paired devices nowhere, so a test never writes into the running user's profile.</summary>
-internal sealed class NowherePhoneSessionStore : IPhoneSessionStore
-{
-    public IReadOnlyList<PhoneSession> Load() => [];
-    public void Save(IReadOnlyList<PhoneSession> sessions) { }
 }
 
 internal static class SpeechModelFiles

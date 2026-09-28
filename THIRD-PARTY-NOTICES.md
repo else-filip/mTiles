@@ -193,7 +193,9 @@ Linked as NuGet packages; none of their source is copied here.
 | Npgsql | PostgreSQL licence |
 | Velopack | MIT |
 | QRCoder | MIT — Copyright (c) 2013-2018 Raffael Herrmann |
-| Microsoft.AspNetCore.App (framework reference — Kestrel, for the phone bridge) | MIT — Copyright (c) .NET Foundation |
+| **Tailcat.Link** (the phone link; its browser client is vendored into the phone page) | BSD-3-Clause — Copyright (c) Andrzej Ból and contributors; the parts ported from tailscale/tailcat are Copyright (c) Tailscale Inc & AUTHORS. Not affiliated with or endorsed by Tailscale Inc. |
+| Sodium.Core (bundles libsodium), BouncyCastle.Cryptography, System.Formats.Cbor — through Tailcat.Link | MIT / ISC (libsodium) / MIT (Bouncy Castle) / MIT |
+| tweetnacl-js 1.0.3 (vendored into the phone page, not the application) | Unlicense (public domain) |
 | Terminal.Avalonia, TodoList.Avalonia, Notepad.Avalonia | ours |
 | **Whisper.net**, **Whisper.net.Runtime** (bundles whisper.cpp) | MIT — Copyright (c) 2024 sandrohanea; whisper.cpp is MIT, Copyright (c) 2023-2024 The ggml authors |
 | **Microsoft.ML.OnnxRuntime** | MIT — Copyright (c) Microsoft Corporation |

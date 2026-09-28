@@ -51,7 +51,8 @@ $required = @(
     @{ Name = 'onnxruntime'; Why = 'the Parakeet engine (ONNX Runtime)'; Windows = @('onnxruntime.dll'); Linux = @('libonnxruntime.so*') },
     # Without it every agent conversation tile fails to open its store - the first SQLite call throws
     # "Library e_sqlite3 not found" - while terminals and everything else start normally.
-    @{ Name = 'e_sqlite3'; Why = 'the agent conversation store (Microsoft.Data.Sqlite)'; Windows = @('e_sqlite3.dll'); Linux = @('libe_sqlite3.so*') }
+    @{ Name = 'e_sqlite3'; Why = 'the agent conversation store (Microsoft.Data.Sqlite)'; Windows = @('e_sqlite3.dll'); Linux = @('libe_sqlite3.so*') },
+    @{ Name = 'libsodium'; Why = 'the phone link''s sealed hellos (Tailcat.Link through Sodium.Core)'; Windows = @('libsodium.dll'); Linux = @('libsodium.so*') }
 )
 
 if ($Rid -eq 'win-x64') {

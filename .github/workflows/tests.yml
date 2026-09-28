@@ -31,6 +31,13 @@ jobs:
       - name: Test
         run: dotnet test -c Release --logger "trx;LogFileName=r.trx" --results-directory TestResults
 
+      # The phone page's pure parts — the markdown reader that must never produce HTML, and the geometry
+      # of the layout miniature. Node ships on both runners; the page has no dependencies to install.
+      - name: Test the phone page
+        if: success() || failure()
+        shell: bash
+        run: node --test site/phone/test/*.test.mjs
+
       # Fails on a test slower than the budget that does not say why it may be (README, rule 1). After
       # the suite, and on its result file, so a red test and a slow one are two different messages.
       # A test over the budget is run once more on its own and fails only if it is slow again: a hosted

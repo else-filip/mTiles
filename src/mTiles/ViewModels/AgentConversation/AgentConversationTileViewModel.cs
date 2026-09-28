@@ -15,6 +15,7 @@ using mTiles.Models;
 using mTiles.Services;
 using mTiles.Services.Agents;
 using mTiles.Services.Agents.Sessions;
+using mTiles.Services.Phone.Remote;
 using mTiles.Services.Providers;
 
 namespace mTiles.ViewModels.AgentConversation;
@@ -37,7 +38,7 @@ namespace mTiles.ViewModels.AgentConversation;
 /// </remarks>
 public sealed partial class AgentConversationTileViewModel : ObservableObject,
     IBusyTile, IMaximizableTile, ITextInputTile, IDescribedTile, ITileActions, IAgentTile, IProcessTile,
-    INewConversationTile
+    INewConversationTile, IRemoteViewTile, IRemotePreviewTile
 {
     public const string NewConversationActionId = TileActionIds.NewConversation;
 
@@ -588,6 +589,16 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
         Draft = Draft.Length == 0 ? text : $"{Draft.TrimEnd()} {text}";
         if (submit) _ = SendAsync();
         return true;
+    }
+
+    /// <summary>A message typed on a phone replaces the draft rather than joining it: it is a whole
+    /// message of its own, and glued onto a half-typed sentence on the desktop it would be neither.</summary>
+    private string? SendRemoteText(string text, bool submit)
+    {
+        if (RemoteText.WouldOverwrite(Draft, text)) return RemoteText.DraftInTheWay;
+        Draft = text;
+        if (submit) _ = SendAsync();
+        return null;
     }
 
     public bool TryPressKey(TileKey key)
@@ -1872,6 +1883,87 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
         }
     }
 
+    // ── A paired phone ───────────────────────────────────────────────────────────────────────
+
+    /// <summary>The conversation as last drawn, which is what a phone is shown — the same state the
+    /// transcript above was synced from, so the two cannot disagree.</summary>
+    private ConversationState _remoteState = ConversationState.Empty;
+
+    private long _remoteVersion;
+
+    /// <inheritdoc />
+    /// <remarks>Moves with every property this tile raises, which includes every draw: conservative, and
+    /// a counter costs nothing, while missing a change costs a phone showing a stale answer.</remarks>
+    public long RemoteVersion => Interlocked.Read(ref _remoteVersion);
+
+    protected override void OnPropertyChanged(System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        Interlocked.Increment(ref _remoteVersion);
+        base.OnPropertyChanged(e);
+    }
+
+    /// <inheritdoc />
+    public RemoteTileBody DescribeForRemote()
+    {
+        var chat = AgentChatProjection.Project(_remoteState);
+        var status = LaunchProblem ?? (StatusText.Length > 0 ? StatusText : null);
+        var canType = CanSend();
+
+        return new RemoteTileBody(
+            "chat",
+            new RemoteStatus(RemoteActivity.Of(Activity), status, HeaderNote.Length > 0 ? HeaderNote : null,
+                ContextPercent),
+            Chat: chat,
+            Composer: new RemoteComposer(
+                canType,
+                canType ? "Message the agent" : IsStarting ? "The agent is starting…" : "The agent is not running",
+                CanInterrupt: IsBusy && CanInterrupt));
+    }
+
+    /// <inheritdoc />
+    public TilePreview? PreviewForRemote() =>
+        LaunchProblem is { } problem
+            ? new TilePreview(problem)
+            : AgentChatProjection.Preview(_remoteState, ContextPercent);
+
+    /// <inheritdoc />
+    /// <remarks>Answers are checked against the request the agent is waiting on <em>now</em>: the phone's
+    /// id is as old as the last picture it was sent, and an approval answered after it was replaced must
+    /// not be read as an answer to the next one.</remarks>
+    public async Task<string?> HandleRemoteAsync(RemoteTileCommand command)
+    {
+        switch (command)
+        {
+            case RemoteSendText send:
+                if (!CanSend()) return IsStarting ? "The agent is still starting." : "The agent is not running.";
+                return SendRemoteText(send.Text, send.Submit);
+
+            case RemoteKey key:
+                return TryPressKey(key.Key) ? null : "That key does nothing here.";
+
+            case RemoteInterrupt:
+                if (!IsBusy) return "The agent is not working on anything.";
+                await InterruptAsync();
+                return null;
+
+            case RemoteChoose choose:
+                if (AgentChatProjection.ResolveChoice(_remoteState, choose.PendingId, choose.OptionId, out var refusal)
+                    is not var (approval, decision))
+                    return refusal;
+                await AnswerApprovalAsync(approval.RequestId, decision);
+                return null;
+
+            case RemoteAnswer answer:
+                if (_remoteState.PendingQuestions.All(q => q.RequestId != answer.PendingId))
+                    return "Those questions have already been answered.";
+                await AnswerQuestionsAsync(answer.PendingId, answer.Answers);
+                return null;
+
+            default:
+                return "The agent cannot do that from a phone.";
+        }
+    }
+
     private Task AnswerApprovalAsync(string requestId, ApprovalDecision decision) =>
         _host is null
             ? Task.CompletedTask
@@ -1976,6 +2068,7 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
             if (opened) TranscriptOpened?.Invoke();
         }
 
+        _remoteState = state;
         IsWorking = state.IsWorking;
         HasWorkingSubAgents = state.WorkingSubAgentCount > 0;
         Model = state.Model ?? "";

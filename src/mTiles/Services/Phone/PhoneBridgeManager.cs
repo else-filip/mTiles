@@ -1,306 +1,164 @@
-﻿using System.Diagnostics;
-using System.Net;
-using System.Text.Json;
+using System.Diagnostics;
 using mTiles.Models;
+using mTiles.Services.Phone.Remote;
 using mTiles.Services.Speech;
 using mTiles.ViewModels;
+using Tailcat.Link;
+using Tailcat.Keys;
+using Tailcat.Link.Storage;
 
 namespace mTiles.Services.Phone;
 
 /// <summary>
-/// The phone bridge as one thing: which addresses to offer, who is paired, the server, and the route from
-/// a phone's microphone into the tile the user is looking at.
+/// The phone bridge as one thing: the link to the relay, who is paired, what each phone is looking at,
+/// and the route from a phone's microphone into a tile.
 /// </summary>
 /// <remarks>
-/// Modelled on <see cref="Database.DatabaseServiceManager"/> — one object the application starts and
-/// stops, raising <see cref="StateChanged"/> for the UI to redraw from — because the two have the same
-/// shape: a server whose lifetime is a user decision, with state worth showing while it runs.
-/// <para>It implements <see cref="IPhoneSink"/> rather than handing the server a pile of callbacks,
-/// which keeps the transport ignorant of dictation and this class ignorant of WebSockets.</para>
+/// <para><b>Nothing here listens to the network.</b> Both this machine and the phone dial <em>out</em> to
+/// Tailscale's public DERP relays through tailcat-link, which passes sealed bytes between two public keys
+/// and cannot read them — so there is no port, no certificate and no firewall rule, and it works from the
+/// sofa and from the other side of the country alike. The Kestrel server, the self-signed certificates,
+/// the firewall repair and the address ranking this replaced all existed only because a port had to be
+/// opened and found. See <c>docs/adr/0006-phone-over-relays.md</c>.</para>
+/// <para>What is protected is the <b>keyboard</b>: a paired phone can type into a terminal. Pairing is a
+/// single-use invitation code shown as a QR code for a few minutes, and a device is unpaired from the
+/// panel — after which the host refuses it however often it comes back.</para>
+/// <para>Modelled on <see cref="Database.DatabaseServiceManager"/> — one object the application starts
+/// and stops, raising <see cref="StateChanged"/> for the UI to redraw from.</para>
 /// </remarks>
-public sealed class PhoneBridgeManager : IPhoneSink, IAsyncDisposable
+public sealed class PhoneBridgeManager : IAsyncDisposable
 {
+    /// <summary>How many phones may be paired at once. A security bound, not a resource one: every
+    /// paired device can type into the terminals.</summary>
+    public const int MaxDevices = 4;
+
+    /// <summary>How long a QR code on screen can be used to pair.</summary>
+    public static readonly TimeSpan CodeLifetime = TimeSpan.FromMinutes(5);
+
     private readonly SettingsService _settings;
-    private readonly DictationService _dictation;
-    private readonly RoutedAudioCapture _router;
-    private readonly Func<LeafTileNodeViewModel?> _activeTile;
-    private readonly PhoneEndpointDirectory _directory;
-    private readonly PhoneCertificateProvider _certificates;
+    private readonly PhoneDictation _phoneDictation;
+    private readonly IPhoneWorkspaces _workspaces;
     private readonly IUiDispatcher _dispatcher;
+    private readonly Func<LinkOptions> _linkOptions;
+    private readonly TimeSpan _pushInterval;
 
-    /// <summary>Which address to listen on. Null means every interface, which is the point of the
-    /// feature; the tests pass loopback so running them raises no firewall prompt.</summary>
-    private readonly IPAddress? _bindTo;
-
-    private PhoneBridgeServer? _server;
-    private PhoneTlsMaterial? _tls;
-
-    /// <summary>
-    /// Set once the manager has been disposed, so nothing queued outlives it.
-    /// </summary>
-    /// <remarks>
-    /// Disposal releases the lifecycle semaphore, and a timer callback or a hold released afterwards
-    /// would wait on it — an <see cref="ObjectDisposedException"/> on a thread-pool thread, from work
-    /// nobody asked for, after the object it belonged to had gone.
-    /// </remarks>
-    private volatile bool _disposed;
-
-    /// <summary>Serialises every start and stop. See <see cref="StartAsync"/> for what it prevents.</summary>
+    /// <summary>Serialises every start and stop.</summary>
     private readonly SemaphoreSlim _lifecycle = new(1, 1);
 
-    /// <summary>The addresses the running server was configured for. Empty when it is not running.</summary>
-    private HashSet<string> _activeHosts = new(StringComparer.OrdinalIgnoreCase);
+    private ILinkHost? _host;
+    private volatile bool _disposed;
 
-    /// <summary>How many panels are open. The bridge stays up while any of them is.</summary>
+    /// <summary>How many panels are open. The link stays up while any of them is.</summary>
     private int _holds;
 
-    private readonly Lock _reconfigureGate = new();
-    private Timer? _reconfigure;
+    /// <summary>The setting as last acted on, so an unrelated save does nothing.</summary>
+    private bool _appliedEnabled;
 
-    /// <summary>Set by the network watcher, so an ordinary settings edit does not re-read the adapters.</summary>
-    private volatile bool _addressesMayHaveChanged;
+    /// <summary>What each paired phone is looking at and has been sent.</summary>
+    private readonly PhonePushPlan _plan;
 
-    /// <summary>
-    /// The settings as last acted on, so an unrelated save does nothing.
-    /// </summary>
-    /// <remarks>
-    /// Three values, not the one they combine into. <c>ShouldKeepRunning</c> is already false when the
-    /// phone switch is off, so switching <em>dictation</em> off left it false either side of the change —
-    /// the gate saw nothing move and scheduled nothing, while a bridge held up by a paired phone went on
-    /// listening.
-    /// </remarks>
-    private bool _appliedPhoneEnabled;
-    private bool _appliedSpeechEnabled;
-    private int _appliedPort = -1;
+    private Timer? _pushTimer;
 
-    /// <summary>
-    /// Bumped every time the server is (re)started, so a panel can tell it is looking at a different one.
-    /// </summary>
-    /// <remarks>
-    /// The port alone does not say: a restart caused by a change of network usually lands on the *same*
-    /// port with a different set of addresses, which is precisely the case that leaves every code on
-    /// screen addressed to something the server no longer answers for.
-    /// </remarks>
-    internal int Generation { get; private set; }
+    /// <summary>How long a failed start waits before trying the relay again.</summary>
+    internal static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(30);
 
-    /// <summary>
-    /// Drops sessions that have gone stale, and lets go of the network once the last one has.
-    /// </summary>
-    /// <remarks>
-    /// Nothing else notices an expiry. A device that timed out went on counting as "a phone is paired",
-    /// which is one of the two things that keep this listening — so with the setting off and the panel
-    /// closed, one phone paired at breakfast held the socket open for the rest of the day. Five minutes
-    /// is a dictionary scan against an eight-hour timeout: it costs nothing, and it is what makes
-    /// "listens only while the panel is open or a phone is paired" true rather than nearly true.
-    /// </remarks>
-    private Timer? _sweep;
+    // One-shot: a start that failed while the link is wanted tries again, because nothing else will —
+    // a machine that woke before its Wi-Fi would otherwise stay unreachable to its phone until restarted.
+    private Timer? _retryTimer;
+    private int _pushing;
+    private long _tick;
 
-    private static readonly TimeSpan SweepInterval = TimeSpan.FromMinutes(5);
+    /// <summary>The phones whose previous messages are still on their way; each is left out of a sampling
+    /// until they arrive, so a phone that stopped answering holds back nobody but itself.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Tailcat.Keys.NodePublic, byte> _sending = new();
 
-    /// <summary>The port asked for when the running server was started. Compared against the setting
-    /// to decide whether a restart is due — <see cref="ActivePort"/> cannot be, because a fallback makes
-    /// the two differ on purpose and comparing it would restart the bridge for ever.</summary>
-    private int _requestedPort = -1;
 
-    /// <summary>The tile this stream was aimed at when the user pressed, held for the transcript's
-    /// arrival. Touched only on the UI thread.</summary>
-    private LeafTileNodeViewModel? _streamTile;
-
-    /// <summary>
-    /// The name of the tile the phone is aimed at, as last read on the UI thread.
-    /// </summary>
-    /// <remarks>
-    /// Cached rather than read on demand, because the only caller is a socket thread and the value lives
-    /// in an Avalonia view model tree — the one place in this class that reached into the UI graph from
-    /// the network. Nothing observable went wrong yet, which is exactly why it is worth removing now
-    /// rather than after it does: what a stale name costs is a wrong caption for a fraction of a second,
-    /// and what a torn read costs is not bounded at all.
-    /// </remarks>
-    private volatile string _tileName = "";
-
-    /// <summary>
-    /// The actions message a phone is sent, as last built on the UI thread.
-    /// </summary>
-    /// <remarks>
-    /// Cached for the reason <see cref="_tileName"/> is, and more urgently: building it walks the active
-    /// tile's content and asks each action whether it is enabled right now, which is a read of a live
-    /// Avalonia view model tree. A socket thread must never do that — so it is assembled where it is
-    /// safe to assemble and published as an immutable snapshot.
-    /// </remarks>
-    private volatile string _actionsJson = PhoneTileActions.Describe("", []);
-
-    /// <summary>What was last broadcast, so an unchanged reading costs nothing. UI thread only.</summary>
-    private string? _lastState;
-    private string? _lastActions;
-
+    /// <param name="linkOptions">What the link is built with. The tests hand in an in-memory relay; the
+    /// application leaves it null and gets Tailscale's relays and a store in this application's own
+    /// directory.</param>
+    /// <param name="pushInterval">How often what the phones are looking at is sampled. Zero starts no
+    /// timer — the tests push by hand.</param>
     internal PhoneBridgeManager(
         SettingsService settings,
         DictationService dictation,
         RoutedAudioCapture router,
-        Func<LeafTileNodeViewModel?> activeTile,
-        PhoneEndpointDirectory? directory = null,
-        PhoneCertificateProvider? certificates = null,
+        IPhoneWorkspaces workspaces,
         IUiDispatcher? dispatcher = null,
-        IPAddress? bindTo = null,
-        IPhoneSessionStore? sessionStore = null)
+        Func<LinkOptions>? linkOptions = null,
+        TimeSpan? pushInterval = null)
     {
-        _bindTo = bindTo;
-        Pairing = new PhonePairing(store: sessionStore ?? new PhoneSessionStore());
         _settings = settings;
-        _dictation = dictation;
-        _router = router;
-        _activeTile = activeTile;
-        _directory = directory ?? PhoneEndpointDirectory.CreateDefault();
-        _certificates = certificates ?? PhoneCertificateProvider.CreateDefault();
+        _workspaces = workspaces;
+        _plan = new PhonePushPlan(workspaces);
         _dispatcher = dispatcher ?? new AvaloniaUiDispatcher();
+        _linkOptions = linkOptions ?? DefaultLinkOptions;
+        _pushInterval = pushInterval ?? TimeSpan.FromMilliseconds(250);
+        _appliedEnabled = settings.Settings.Phone.Enabled;
 
-        // Posted, not raised here. StopCoreAsync revokes the pairings while holding the lifecycle
-        // semaphore, so this fired under it — the one remaining path doing what the notes on StartAsync
-        // and StopIfUnneededAsync both warn against, in this same file. It works today only because the
-        // single subscriber posts to the dispatcher itself, which is a property of the subscriber and not
-        // something this class can rely on.
-        // Seeded from what is on disk, so the first unrelated save does not read as a change and
-        // schedule a reconfiguration of something that is already in that state.
-        MarkApplied();
-
-        Pairing.Changed += () => _dispatcher.Post(() => StateChanged?.Invoke());
-        _dictation.StateChanged += PublishState;
+        _phoneDictation = new PhoneDictation(settings, dictation, router, workspaces, _dispatcher);
+        _phoneDictation.Changed += OnDictationChanged;
         _settings.SettingsChanged += OnSettingsChanged;
-        System.Net.NetworkInformation.NetworkChange.NetworkAddressChanged += OnNetworkChanged;
     }
 
-    /// <summary>Raised when the bridge starts or stops, or a device pairs or leaves.</summary>
+    /// <summary>Raised when the link starts or stops, or a device pairs, connects or leaves. On any
+    /// thread.</summary>
     public event Action? StateChanged;
 
-    /// <summary>
-    /// What has the keyboard right now, wired from the window.
-    /// </summary>
-    /// <remarks>
-    /// The panel promises that dictating from a phone works "exactly as the Alt+Space shortcut does", and
-    /// the shortcut hands its transcript to the focused text control before falling back to the tile's
-    /// terminal. Without this the phone had no such fallback, so speaking while a Note or a settings box
-    /// had focus produced a transcript with nowhere to go: the active tile was not a terminal, delivery
-    /// failed, and the words were reported undeliverable rather than typed. Resolved on the UI thread
-    /// when the recording starts — the same moment the shortcut resolves it, and for the same reason: the
-    /// text belongs where the user was looking when they spoke.
-    /// </remarks>
-    internal Func<Avalonia.Input.IInputElement?>? FocusedElement { get; set; }
-
-    internal PhonePairing Pairing { get; }
+    /// <summary>What has the keyboard right now, wired from the window.</summary>
+    /// <remarks>Only for a phone that has not chosen a tile: it dictates the way the Alt+Space shortcut
+    /// does, into the focused text control before the active tile. A phone that has zoomed into a tile
+    /// is aiming at that tile, and the words go there whatever has the focus on the desktop.</remarks>
+    internal Func<Avalonia.Input.IInputElement?>? FocusedElement
+    {
+        get => _phoneDictation.FocusedElement;
+        set => _phoneDictation.FocusedElement = value;
+    }
 
     /// <summary>The settings this bridge reads, so a view that has the bridge need not also be handed them.</summary>
     public SettingsService Settings => _settings;
 
-    internal IFirewallGuide Firewall { get; } = FirewallGuide.ForThisMachine();
-
-    public bool IsRunning => _server is { IsRunning: true };
+    public bool IsRunning => _host is not null;
 
     /// <summary>Why the last start failed, for the panel to show. Null when it did not.</summary>
     public string? LastError { get; private set; }
 
-    /// <summary>
-    /// Whether a phone reaching this machine at <paramref name="host"/> sees no certificate warning.
-    /// </summary>
-    /// <remarks>
-    /// Per host, not per bridge. With Tailscale running, one of the two QR codes on screen leads to a
-    /// publicly-trusted certificate and the other cannot — so a single flag was wrong for one of them
-    /// whichever value it took, and it was wrong in the direction that surprises the user.
-    /// </remarks>
-    internal bool IsTrustedFor(string host) => _tls?.IsTrustedFor(host) ?? false;
-
-    /// <summary>The addresses on offer, as of the last <see cref="RefreshAsync"/>.</summary>
-    internal PhoneEndpointBoard Board { get; private set; } = PhoneEndpointBoard.Empty;
-
-    internal SessionLocation Location => _directory.Location;
-
-    /// <summary>The port the user asked for. Zero means "whichever one is free".</summary>
-    public int Port => _settings.Settings.Phone.Port;
-
-    /// <summary>
-    /// Whether the bridge should stay up of its own accord.
-    /// </summary>
-    /// <remarks>
-    /// Both switches, not just the phone one. The QR button is hidden when dictation is off — there would
-    /// be nothing for a phone to do — but the start condition only ever read <c>Phone.Enabled</c>, so
-    /// somebody who turned dictation off and had left "keep running" on was left with a server listening
-    /// on the network, unreachable from the application and useless if reached. The two conditions have to
-    /// be the same one.
-    /// </remarks>
+    /// <summary>Whether the link should be up of its own accord: asked to stay connected, or a phone is
+    /// paired and would otherwise have nothing to reach.</summary>
     internal bool ShouldKeepRunning =>
-        _settings.Settings.Phone.Enabled && _settings.Settings.Speech.Enabled;
+        _settings.Settings.Phone.Enabled || _settings.Settings.Phone.HasPairedDevices;
 
-    /// <summary>
-    /// The port the bridge is really on, which is what the QR codes point at.
-    /// </summary>
-    /// <remarks>
-    /// Not always <see cref="Port"/>. On Windows the kernel reserves blocks of ports for Hyper-V, WSL and
-    /// Docker at boot — <c>netsh interface ipv4 show excludedportrange protocol=tcp</c> lists them — and a
-    /// port inside one cannot be bound by anything, ever, however free it looks. It is not even a
-    /// collision with another program: <c>netstat</c> attributes it to PID 4, the kernel. A fixed default
-    /// port is therefore a coin toss on a developer machine, which is exactly what this application runs
-    /// on: 18091 was unbindable on the first machine it was tried on.
-    /// </remarks>
-    public int ActivePort => _server?.BoundPort ?? 0;
+    /// <summary>The phones paired with this machine, as the panel lists them.</summary>
+    internal IReadOnlyList<PhoneDevice> Devices =>
+        _host is { } host
+            ? [.. host.Peers.Select(p => new PhoneDevice(p, p.Name ?? "Phone", p.IsConnected, p.PairedAt, p.LastSeen))]
+            : [];
 
-    /// <summary>True when the bridge had to fall back from the port the user asked for.</summary>
-    public bool PortWasSubstituted => IsRunning && Port != 0 && ActivePort != Port;
+    /// <summary>How many paired phones have a session up right now.</summary>
+    internal int ConnectedDevices => _host?.Peers.Count(p => p.IsConnected) ?? 0;
 
-    internal IReadOnlyList<PhoneSession> Sessions => Pairing.Sessions;
-
-    /// <summary>How many paired devices have a socket open right now. See <c>PhoneBridgeServer</c>.</summary>
-    internal int ConnectedDevices => _server?.ConnectedCount ?? 0;
-
-    /// <summary>Re-discovers and re-ranks the addresses without touching the server.</summary>
-    /// <remarks>
-    /// Off the UI thread because it enumerates adapters and may shell out to Tailscale — a second or two
-    /// on a machine with a VPN client that is thinking about something else.
-    /// </remarks>
-    internal async Task RefreshAsync()
+    private static LinkOptions DefaultLinkOptions() => new()
     {
-        await RefreshCoreAsync().ConfigureAwait(false);
-        StateChanged?.Invoke();
-    }
+        Store = new FileLinkStore(AppPaths.GetPhoneDirectory()),
+        MaxPeers = MaxDevices,
+        PairingWindow = CodeLifetime,
+        LoggerFactory = new TraceLoggerFactory(),
+    };
 
-    /// <summary>
-    /// The same work without the event, for callers that already hold the lifecycle lock.
-    /// </summary>
-    /// <remarks>
-    /// <see cref="StartCoreAsync"/> refreshes when the board is empty, and it runs under the semaphore —
-    /// so raising from inside was the very thing the note on <see cref="StartAsync"/> warns against, in
-    /// the file that states the rule. A handler free to ask this object to start or stop would have
-    /// deadlocked on a lock that is not reentrant.
-    /// </remarks>
-    private async Task RefreshCoreAsync() =>
-        Board = await Task.Run(() => _directory.Build(PinnedHostFor)).ConfigureAwait(false);
+    // ── lifetime ────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Starts listening, or reconfigures a running bridge when the port or the address set has changed.
-    /// Returns false and sets <see cref="LastError"/> on failure.
-    /// </summary>
-    /// <remarks>
-    /// <b>Serialised, and that is not defensive tidiness.</b> Three callers reach here without
-    /// coordinating: the panel opening, the application starting with the setting on, and any settings
-    /// change — which includes the one this class makes itself when it pins the address a phone arrived
-    /// on, <em>during that phone own pairing request</em>. Two overlapping starts both saw no running
-    /// server, both built one, and the second failed to bind — whereupon its own error path called
-    /// StopAsync and disposed the <em>first one</em> server. The user was told "port already in use",
-    /// naming a port that nothing but this application was using, and left with a bridge that had just
-    /// stopped listening.
-    /// </remarks>
+    /// <summary>Connects to the relay. Returns false and sets <see cref="LastError"/> on failure.</summary>
     internal async Task<bool> StartAsync()
     {
-        if (_disposed)
-            return false;
+        if (_disposed) return false;
 
-        bool started;
-
-        // The flag is checked before the wait and the wait can still lose the race with disposal, so the
-        // throw is caught rather than left to become an unobserved exception on a thread-pool thread.
         try { await _lifecycle.WaitAsync().ConfigureAwait(false); }
         catch (ObjectDisposedException) { return false; }
 
+        bool started;
         try
         {
+            // Disposed while this call waited for the lock: a host started now would be one nobody stops.
+            if (_disposed) return false;
             started = await StartCoreAsync().ConfigureAwait(false);
         }
         finally
@@ -308,262 +166,98 @@ public sealed class PhoneBridgeManager : IPhoneSink, IAsyncDisposable
             _lifecycle.Release();
         }
 
-        // Outside the lock. A handler is free to ask this object to start or stop, and the semaphore is
-        // not reentrant — raising the event while holding it made that a deadlock rather than a mistake.
-        // Nothing does today, which is luck, not design.
+        // Outside the lock: a handler is free to ask this object to start or stop, and the semaphore is
+        // not reentrant.
+        if (!started) ScheduleRetryIfWanted();
         StateChanged?.Invoke();
         return started;
     }
 
+    private void ScheduleRetryIfWanted()
+    {
+        if (_disposed || !(ShouldKeepRunning || Volatile.Read(ref _holds) > 0)) return;
+        Interlocked.Exchange(ref _retryTimer,
+            new Timer(_ => _ = StartAsync(), null, RetryDelay, Timeout.InfiniteTimeSpan))?.Dispose();
+    }
+
+    private void CancelRetry() => Interlocked.Exchange(ref _retryTimer, null)?.Dispose();
+
     private async Task<bool> StartCoreAsync()
     {
+        CancelRetry();
+        if (_host is not null) return true;
         LastError = null;
-
-        // Held so the failure path can release them. `_server` and `_tls` are only assigned once the
-        // socket is listening, so before that point nothing else in this class can reach either one.
-        PhoneBridgeServer? scratchServer = null;
-        PhoneTlsMaterial? scratchTls = null;
 
         try
         {
-            if (Board.All.Count == 0)
-                await RefreshCoreAsync().ConfigureAwait(false);
+            var host = await TailcatLink.HostManyAsync(PhoneProtocol.AppName, _linkOptions()).ConfigureAwait(false);
+            host.SetRequestHandler(HandleRequestAsync);
+            host.OnChannel(PhoneProtocol.AudioChannel, _phoneDictation.HandleAudioAsync);
+            host.PeerJoined += OnPeerJoined;
+            host.PeerLeft += OnPeerLeft;
+            _host = host;
 
-            var hosts = Board.All.Select(entry => entry.Endpoint.Host).Distinct().ToList();
-            if (hosts.Count == 0)
-            {
-                LastError = "This machine has no network address a phone could reach.";
-                return false;
-            }
+            RememberWhetherPaired(host.Peers.Count > 0);
 
-            if (IsRunning && !NeedsRestart(hosts))
-                return true;
-
-            if (IsRunning)
-            {
-                // A reconfiguration, not a shutdown: paired phones keep their sessions and reconnect with
-                // the cookie they already hold. Revoking here would mean that connecting a VPN — which
-                // only ever *adds* a way to reach this machine — silently unpaired the phone in the
-                // user hand.
-                await StopCoreAsync(revokePairings: false).ConfigureAwait(false);
-            }
-
-            var tls = await Task.Run(() => _certificates.Resolve(hosts)).ConfigureAwait(false);
-            if (tls is not { Any: true })
-            {
-                LastError = "No TLS certificate could be obtained, and a phone will not open a "
-                            + "microphone on a page that is not secure.";
-                return false;
-            }
-
-            scratchTls = tls;
-
-            var server = new PhoneBridgeServer(Pairing, this, RememberReachedVia);
-            server.ConnectionsChanged += OnConnectionsChanged;
-            scratchServer = server;
-            var wanted = ClampPort(Port);
-
-            try
-            {
-                await server.StartAsync(wanted, tls, hosts, _bindTo).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (wanted != 0 && IsPortUnavailable(ex))
-            {
-                // Falls back rather than refusing. The port is an implementation detail nobody types
-                // anywhere — the QR code carries it — so failing the whole feature to defend a number the
-                // user never chose deliberately is the wrong trade. Which port was taken is shown in the
-                // panel, so it is a visible fallback and not a silent one.
-                Trace.TraceInformation(
-                    "Port {0} could not be bound ({1}); taking a free one instead.", wanted, ex.Message);
-
-                await server.DisposeAsync().ConfigureAwait(false);
-                server = new PhoneBridgeServer(Pairing, this, RememberReachedVia);
-                server.ConnectionsChanged += OnConnectionsChanged;
-                scratchServer = server;
-                await server.StartAsync(0, tls, hosts, _bindTo).ConfigureAwait(false);
-            }
-
-            _server = server;
-            _tls = tls;
-
-            // The setting as written, not the number that was tried: a clamped or substituted value must
-            // not make NeedsRestart disagree with the setting for ever after.
-            _requestedPort = Port;
-
-            // Handed over. Nothing is scratch any more, so the failure path must not release it.
-            scratchServer = null;
-            scratchTls = null;
-            _activeHosts = new HashSet<string>(hosts, StringComparer.OrdinalIgnoreCase);
-
-            _sweep ??= new Timer(_ => Sweep(), null, SweepInterval, SweepInterval);
-            Generation++;
+            if (_pushInterval > TimeSpan.Zero)
+                _pushTimer = new Timer(_ => _ = PushNowAsync(), null, _pushInterval, _pushInterval);
 
             return true;
         }
         catch (Exception ex)
         {
-            LastError = Describe(ex);
-            Trace.TraceWarning("The phone bridge could not start: {0}", ex);
-
-            // Whatever got built on the way to failing. Without this, every failed start leaked a server
-            // — with its Kestrel host and its subscription to PhonePairing — and a certificate holding an
-            // operating-system key handle.
-            if (scratchServer is not null)
-                await scratchServer.DisposeAsync().ConfigureAwait(false);
-
-            scratchTls?.Dispose();
-
-            // The devices are left alone entirely — not merely left on disk. Keeping the file while
-            // clearing the list in memory was half a fix: the phone stayed paired according to the file
-            // and unpaired according to the process, so it could not reconnect until mTiles was
-            // restarted, which is not what the comment claiming to protect it promised. There is no
-            // server at this point, so a live session can do nothing anyway; and a start that fails for
-            // reasons having nothing to do with the user's phones — no address yet on a machine that has
-            // just woken, a certificate that could not be written — has no business touching them.
-            await StopCoreAsync(revokePairings: false).ConfigureAwait(false);
+            Trace.TraceWarning("The phone link could not be started: {0}", ex);
+            LastError = ex is LinkException ? ex.Message : "mTiles could not reach the relay. Check the connection.";
             return false;
         }
     }
 
-    /// <summary>
-    /// Whether the running server is still serving the right thing.
-    /// </summary>
-    /// <remarks>
-    /// <b>The address set, not only the port.</b> The server fixes its allowed <c>Host</c> values and its
-    /// certificate names when it starts, so a bridge left running across a change of network — which is
-    /// exactly what "keep running" invites, on a laptop — kept answering for addresses this machine no
-    /// longer has and rejecting the one it now does. The panel would then draw a perfectly good QR code
-    /// for the new address, and the phone that scanned it met a bare <c>400</c>: no page, no explanation,
-    /// and nothing in the panel suggesting anything was wrong.
-    /// </remarks>
-    private bool NeedsRestart(IReadOnlyCollection<string> hosts) =>
-        _requestedPort != Port || !_activeHosts.SetEquals(hosts);
-
-    /// <summary>
-    /// Keeps a hand-edited port inside the range a socket can be asked for.
-    /// </summary>
-    /// <remarks>
-    /// <c>settings.json</c> is a file the user can open, and <c>Listen</c> answers an out-of-range number
-    /// with <see cref="ArgumentOutOfRangeException"/> — which is not a bind failure, so it does not take
-    /// the fallback and the feature is simply dead with an obscure message. Out of range is treated as
-    /// "choose one for me", which is what the fallback does for every other unusable value.
-    /// </remarks>
-    internal static int ClampPort(int port) => port is >= 0 and <= 65535 ? port : 0;
-
-    /// <summary>
-    /// Whether this is "that port is not available", as opposed to something worth reporting.
-    /// </summary>
-    /// <remarks>
-    /// Three shapes turn up, and assuming one was a bug the tests caught. Kestrel reports a plain
-    /// collision as <see cref="Microsoft.AspNetCore.Connections.AddressInUseException"/> — which derives
-    /// from <see cref="InvalidOperationException"/>, not from anything network-shaped, so matching on
-    /// <see cref="System.Net.Sockets.SocketException"/> alone silently missed the commonest case of all.
-    /// A port inside a kernel-reserved range comes back as an <see cref="IOException"/> wrapping a socket
-    /// error instead. Anything else — a bad certificate, no permission to listen at all — must not be
-    /// quietly retried on a different port: the retry fails the same way and buries the real reason.
-    /// </remarks>
-    private static bool IsPortUnavailable(Exception ex) =>
-        IsBindFailure(ex) || IsBindFailure(ex.InnerException);
-
-    private static bool IsBindFailure(Exception? ex) =>
-        ex is System.Net.Sockets.SocketException or Microsoft.AspNetCore.Connections.AddressInUseException;
-
-    /// <summary>Stops listening and drops every pairing.</summary>
-    internal async Task StopAsync()
+    /// <summary>Stops the link. Paired phones stay paired and reconnect when it next starts.</summary>
+    private async Task StopCoreAsync()
     {
-        if (_disposed)
-            return;
-
-        try { await _lifecycle.WaitAsync().ConfigureAwait(false); }
-        catch (ObjectDisposedException) { return; }
-
-        try
+        CancelRetry();
+        if (_pushTimer is { } timer)
         {
-            await StopCoreAsync(revokePairings: true).ConfigureAwait(false);
-        }
-        finally
-        {
-            _lifecycle.Release();
+            _pushTimer = null;
+            await timer.DisposeAsync().ConfigureAwait(false);
         }
 
-        StateChanged?.Invoke();
+        if (_host is not { } host) return;
+        _host = null;
+
+        host.PeerJoined -= OnPeerJoined;
+        host.PeerLeft -= OnPeerLeft;
+
+        try { await host.DisposeAsync().ConfigureAwait(false); }
+        catch (Exception ex) { Trace.TraceWarning("Closing the phone link failed: {0}", ex); }
+
+        _plan.Clear();
     }
 
-    private async Task StopCoreAsync(bool revokePairings, bool forgetDevices = true)
-    {
-        var server = _server;
-        _server = null;
-        _activeHosts.Clear();
-        _requestedPort = -1;
-
-        if (server is not null)
-            server.ConnectionsChanged -= OnConnectionsChanged;
-
-        _sweep?.Dispose();
-        _sweep = null;
-
-        if (server is not null)
-            await server.DisposeAsync().ConfigureAwait(false);
-
-        // Certificates hold key handles — on Windows, ones the operating system keeps until they are
-        // released. Restarting the bridge for a port change is an ordinary act, so leaking a pair of
-        // them each time is not.
-        _tls?.Dispose();
-        _tls = null;
-
-        if (revokePairings)
-            Pairing.RevokeAll(forgetDevices);
-    }
-
-    /// <summary>
-    /// Keeps the bridge up while a panel is on screen, whatever the setting says.
-    /// </summary>
-    /// <remarks>
-    /// A scope rather than a flag on the view model, so the rule for "may this stop now" lives in one
-    /// place instead of being restated by every caller that might want it stopped — the panel closing,
-    /// the setting being switched off, the last phone being disconnected.
-    /// </remarks>
+    /// <summary>Keeps the link up for as long as the returned scope is alive — the panel, while it is
+    /// open.</summary>
     internal IDisposable HoldOpen()
     {
         Interlocked.Increment(ref _holds);
         return new Hold(this);
     }
 
-    /// <summary>
-    /// Stops the bridge if nothing needs it: not asked to stay up, no panel open, no phone paired.
-    /// </summary>
+    /// <summary>Stops the link if nothing needs it: not asked to stay connected, no panel open, no phone
+    /// paired.</summary>
     internal async Task StopIfUnneededAsync()
     {
-        if (_disposed)
-            return;
+        if (_disposed) return;
 
-        var stopped = false;
-
-        // Under the same lock as starting, and re-checked inside it: the conditions are all things a
-        // concurrent start is in the middle of changing.
         try { await _lifecycle.WaitAsync().ConfigureAwait(false); }
         catch (ObjectDisposedException) { return; }
 
+        var stopped = false;
         try
         {
-            if (!IsRunning)
+            if (_disposed || _host is null || ShouldKeepRunning || Volatile.Read(ref _holds) > 0 || _host.Peers.Count > 0)
                 return;
 
-            if (ShouldKeepRunning)
-                return;
-
-            // The exemption applies only while dictation is on. It exists so that closing the panel does
-            // not cut off a phone somebody is using — but with dictation switched off there is nothing
-            // for that phone to do, and the QR button is hidden, so the exemption kept a socket listening
-            // on the network *and* removed the only control able to close it. It would have stayed up
-            // until the session idled out eight hours later, or the application was closed.
-            // SessionCount, not Sessions: the latter sweeps and raises Changed, and this runs under the
-            // lifecycle lock — the very thing the notes on StartAsync warn about.
-            if (_settings.Settings.Speech.Enabled &&
-                (Volatile.Read(ref _holds) > 0 || Pairing.SessionCount > 0))
-                return;
-
-            await StopCoreAsync(revokePairings: true).ConfigureAwait(false);
+            await StopCoreAsync().ConfigureAwait(false);
             stopped = true;
         }
         finally
@@ -571,162 +265,41 @@ public sealed class PhoneBridgeManager : IPhoneSink, IAsyncDisposable
             _lifecycle.Release();
         }
 
-        if (stopped)
-            StateChanged?.Invoke();
+        if (stopped) StateChanged?.Invoke();
     }
 
-    /// <summary>
-    /// Reacts to the switch and the port in Settings.
-    /// </summary>
-    /// <remarks>
-    /// <para>Without this the switch was write-only: turning it <em>off</em> left a server listening on
-    /// the network until the application was restarted, which is the wrong direction for the one setting
-    /// whose whole purpose is to stop that. Turning it on starts the bridge, so a paired phone can
-    /// reconnect without the panel being opened first — which is what the setting promises.</para>
-    /// <para>Gated on the two values it can act on. This listens to the whole settings file, so without
-    /// the gate every keystroke in any settings box scheduled a reconfiguration — and a reconfiguration
-    /// re-reads the machine's addresses, which shells out to <c>tailscale status</c>. Typing a font name
-    /// was spawning processes.</para>
-    /// </remarks>
     private void OnSettingsChanged()
     {
-        var settings = _settings.Settings;
+        var enabled = _settings.Settings.Phone.Enabled;
+        if (enabled == _appliedEnabled) return;
+        _appliedEnabled = enabled;
 
-        if (settings.Phone.Enabled == _appliedPhoneEnabled &&
-            settings.Speech.Enabled == _appliedSpeechEnabled &&
-            settings.Phone.Port == _appliedPort)
-            return;
-
-        ScheduleReconfigure();
+        _ = enabled ? StartAsync() : StopIfUnneededAsync();
     }
 
     /// <summary>
-    /// Re-discovers and reconfigures when this machine's addresses change underneath a running bridge.
+    /// Takes away what the Kestrel bridge left in this application's directory.
     /// </summary>
     /// <remarks>
-    /// Without it, "keep running" came apart on a laptop. The address set is only re-read when the panel
-    /// is opened, and the whole point of that setting is that the panel never has to be — so a machine
-    /// that joined another network kept a server configured for the old one: answering for addresses it
-    /// no longer has, holding a certificate that does not name the one it does, and rejecting the paired
-    /// phone that tried to come back. Nothing on screen would have said so, because nothing was on screen.
-    /// <para>Shares the debounce with Settings: this event arrives in bursts — several times for a single
-    /// Wi-Fi handover, and once per adapter — and each one would otherwise be a rebind.</para>
+    /// <c>bridge.pfx</c> holds a private key, and <c>sessions.json</c> the hashes of tokens that no longer
+    /// open anything. Neither is read by anything now, so the key is the one thing worth not leaving
+    /// behind. Called once at startup, whether or not the link ever runs. Best effort: a file that cannot be deleted is one nothing will ever read again either.
     /// </remarks>
-    private void OnNetworkChanged(object? sender, EventArgs e)
-    {
-        // Not "only while running". A start that failed for want of an address is exactly the state a
-        // network change should rescue, and it is the ordinary one: a laptop resumes, mTiles is up before
-        // the Wi-Fi has associated, the start finds nothing to bind to — and then this event arrived and
-        // was thrown away, leaving the bridge down until the application was restarted or somebody opened
-        // the panel by hand.
-        if (!IsRunning && !ShouldKeepRunning)
-            return;
-
-        _addressesMayHaveChanged = true;
-        ScheduleReconfigure();
-    }
-
-    /// <summary>A device connected or disconnected; the panel's "paired versus connected" depends on it.</summary>
-    private void OnConnectionsChanged() => _dispatcher.Post(() => StateChanged?.Invoke());
-
-    /// <summary>How long a displayed pairing code stays redeemable.</summary>
-    internal static TimeSpan CodeLifetime => PhonePairing.DefaultPairingLifetime;
-
-    /// <summary>Wrapped, because this runs on a thread-pool timer and an escape ends the process.</summary>
-    private void Sweep()
+    public static void ForgetKestrelLeftovers()
     {
         try
         {
-            Pairing.Sweep();
-            _ = StopIfUnneededAsync();
+            var directory = AppPaths.GetPhoneDirectory();
+            foreach (var name in (string[])["bridge.pfx", "sessions.json", "tailscale.crt", "tailscale.key"])
+            {
+                var path = Path.Combine(directory, name);
+                if (File.Exists(path)) File.Delete(path);
+            }
         }
         catch (Exception ex)
         {
-            Trace.TraceWarning("Sweeping paired phones failed: {0}", ex);
+            Trace.TraceWarning("Removing the old phone bridge's files failed: {0}", ex.Message);
         }
-    }
-
-    private void ScheduleReconfigure()
-    {
-        lock (_reconfigureGate)
-        {
-            _reconfigure?.Dispose();
-            _reconfigure = new Timer(
-                _ => _ = ApplySettingsAsync(), null, ReconfigureDelayMs, Timeout.Infinite);
-        }
-    }
-
-    /// <summary>
-    /// How long to let the settings settle before acting on them.
-    /// </summary>
-    /// <remarks>
-    /// The port is a spinner bound straight to the stored value, so raising it from 18091 to 18095 saves
-    /// five times on the way. Without this, each of those intermediate numbers tore the server down and
-    /// bound it again — four pointless rebinds, four chances to lose a race with the operating system
-    /// over a port still in TIME_WAIT, and a paired phone dropped in the middle. It also covers the burst
-    /// of unrelated saves that any settings edit produces, since this listens to the whole file.
-    /// </remarks>
-    private const int ReconfigureDelayMs = 750;
-
-    private async Task ApplySettingsAsync()
-    {
-        // Wrapped, because this runs on a thread-pool thread from a timer: an exception escaping here
-        // ends the process, and no reconfiguration is worth the application.
-        try
-        {
-            // Before the branch, not inside one of them. StartAsync compares the running configuration
-            // against whatever Board last said, so a stale Board hides a real change — and the branch this
-            // used to sit in was the wrong one: a network change while dictation is switched off but the
-            // panel is open took the *other* path, reached StartAsync with yesterday's addresses, decided
-            // nothing had changed, and dropped the event on the floor.
-            //
-            // Only when the network said so, because re-reading costs a process spawn for `tailscale
-            // status` and an ordinary settings edit has no reason to pay it.
-            if (IsRunning && _addressesMayHaveChanged)
-            {
-                _addressesMayHaveChanged = false;
-                await RefreshAsync().ConfigureAwait(false);
-            }
-
-            if (!ShouldKeepRunning)
-            {
-                await StopIfUnneededAsync().ConfigureAwait(false);
-
-                // Still up, because a panel is open or a phone is paired. A changed port or a changed
-                // address set has to reach it anyway: marking the settings applied while the server kept
-                // the old ones meant the gate never fired for those values again.
-                if (IsRunning && !await StartAsync().ConfigureAwait(false))
-                    return;
-
-                MarkApplied();
-                return;
-            }
-
-            // covers a changed port or a changed address set
-            if (await StartAsync().ConfigureAwait(false))
-                MarkApplied();
-        }
-        catch (Exception ex)
-        {
-            Trace.TraceWarning("Applying the phone settings failed: {0}", ex);
-        }
-    }
-
-    /// <summary>
-    /// Records the settings as acted on, so an unrelated save does not schedule another attempt.
-    /// </summary>
-    /// <remarks>
-    /// Only after success. Doing it in a <c>finally</c> marked a <em>failed</em> reconfiguration as
-    /// applied, and the gate in <see cref="OnSettingsChanged"/> then refused to try again for the same
-    /// values — so switching "keep running" on while the bridge could not start meant it stayed off until
-    /// the application was restarted, with the switch showing on.
-    /// </remarks>
-    private void MarkApplied()
-    {
-        var settings = _settings.Settings;
-        _appliedPhoneEnabled = settings.Phone.Enabled;
-        _appliedSpeechEnabled = settings.Speech.Enabled;
-        _appliedPort = settings.Phone.Port;
     }
 
     private sealed class Hold(PhoneBridgeManager owner) : IDisposable
@@ -735,450 +308,407 @@ public sealed class PhoneBridgeManager : IPhoneSink, IAsyncDisposable
 
         public void Dispose()
         {
-            if (_released)
-                return;
-
+            if (_released) return;
             _released = true;
             Interlocked.Decrement(ref owner._holds);
             _ = owner.StopIfUnneededAsync();
         }
     }
 
+    // ── pairing ─────────────────────────────────────────────────────────────────────────────────
+
     /// <summary>
-    /// The URL to put in a QR code for <paramref name="endpoint"/>, minting a fresh pairing token.
+    /// Mints an invitation for one phone and says where to send it.
     /// </summary>
-    /// <remarks>
-    /// Every displayed code gets its own token and all of them stay live, because the panel shows two and
-    /// the second exists precisely for when the first does not work.
-    /// </remarks>
-    internal (string Url, string Token) BuildPairingUrl(PhoneEndpoint endpoint)
+    /// <remarks>The code rides in the URL's fragment, which a browser never sends to the server — so
+    /// GitHub, which hosts the page, never sees it. Single use: a code photographed off the screen after
+    /// the phone it was meant for has paired opens nothing.</remarks>
+    internal async Task<PhoneInvitation> InviteAsync()
     {
-        var token = Pairing.IssuePairingToken();
-        return ($"https://{endpoint.Host}:{ActivePort}/p/{token}", token);
+        if (_host is not { } host)
+            throw new InvalidOperationException("The phone link is not running.");
+
+        if (host.Peers.Count >= MaxDevices)
+            throw new PhoneBridgeException(
+                $"{MaxDevices} devices are already paired. Unpair one before pairing another.");
+
+        var invitation = await host.InviteAsync(new InvitationRequest
+        {
+            Label = "phone",
+            Lifetime = CodeLifetime,
+            SingleUse = true,
+        }).ConfigureAwait(false);
+
+        var code = invitation.Code.Value;
+        var page = _settings.Settings.Phone.PageUrl;
+        return new PhoneInvitation(invitation.Id, $"{page}#{Uri.EscapeDataString(code)}", code, invitation.ExpiresAt);
     }
 
-    /// <summary>Withdraws the displayed codes. Called when the panel closes.</summary>
-    internal void StopShowingCodes() => Pairing.ClearPairingTokens();
+    /// <summary>Withdraws a code that is no longer on screen.</summary>
+    internal async Task RevokeAsync(Guid invitationId)
+    {
+        if (_host is not { } host) return;
+        try { await host.RevokeInvitationAsync(invitationId).ConfigureAwait(false); }
+        catch (Exception ex) { Trace.TraceWarning("Withdrawing a phone invitation failed: {0}", ex.Message); }
+    }
 
-    /// <summary>Opens the firewall for the bridge's port, prompting for the rights to do it.</summary>
-    /// <param name="port">Passed in rather than read from <see cref="ActivePort"/>, which is zero when
-    /// there is no server — the case the firewall help exists for. The panel knows the honest answer
-    /// (the configured port, which the next attempt to start will ask for) and already hands it to
-    /// <c>GetAdvice</c> and <c>DiagnoseAsync</c>. Both implementations of <c>TryAllowAsync</c> happen to
-    /// ignore it today, and the interface promises nothing of the kind.</param>
-    internal Task<FirewallResult> RepairFirewallAsync(int port) => Firewall.TryAllowAsync(port);
+    /// <summary>Unpairs a phone: it is dropped, forgotten, and refused if it comes back.</summary>
+    internal Task UnpairAsync(PhoneDevice device) => UnpairAsync(device.Peer);
 
-    // ── IPhoneSink ─────────────────────────────────────────────────────────────────────────────
+    private async Task UnpairAsync(ILinkPeer peer)
+    {
+        if (_host is not { } host) return;
 
-    Task<PhoneStreamOutcome> IPhoneSink.BeginAsync(int sampleRate) =>
-        _dispatcher.InvokeAsync(() =>
+        await host.ForgetPeerAsync(peer).ConfigureAwait(false);
+        _plan.Remove(peer.Key);
+
+        RememberWhetherPaired(host.Peers.Count > 0);
+        StateChanged?.Invoke();
+        await StopIfUnneededAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>How long a phone that logged itself out is given to receive the answer before it is
+    /// forgotten.</summary>
+    internal static readonly TimeSpan UnpairGrace = TimeSpan.FromSeconds(1);
+
+    private async Task ForgetAfterAnsweringAsync(ILinkPeer peer)
+    {
+        try
         {
-            // Each refusal names its own cause. The phone is often the only screen the user is looking
-            // at, and "it did not work" sends them back to the computer to guess which of four things
-            // was wrong.
-            if (!_settings.Settings.Speech.Enabled)
-                return new PhoneStreamOutcome(false, "Dictation is switched off in mTiles.");
+            await Task.Delay(UnpairGrace).ConfigureAwait(false);
+            _dispatcher.Post(() => _phoneDictation.CancelIfFrom(peer));
+            await UnpairAsync(peer).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Not awaited by anybody. The phone has already forgotten this machine, so what is left is a
+            // row in the panel that Unpair there still removes.
+            Trace.TraceWarning("Forgetting a phone that logged out failed: {0}", ex);
+        }
+    }
 
-            // Deliberately *not* DictationService.IsReady. That asks, among other things, whether this
-            // machine has a working audio backend — and it is answered before the phone route is armed,
-            // so on a machine with no microphone at all it says no. Those are precisely the machines this
-            // feature exists for: the far end of a remote desktop session. Worse, the refusal blamed a
-            // missing model, sending the user to download something that was already there.
-            if (_dictation.SelectedModel is not { } model || !_dictation.Store.IsDownloaded(model))
-                return new PhoneStreamOutcome(false,
-                    "mTiles has no speech model downloaded yet. Set up dictation on the computer first.");
+    private void OnPeerJoined(object? sender, PeerEventArgs e)
+    {
+        // Everything is sent again: a phone that reconnects has a page that may have been reloaded, and
+        // anything it was sent before the drop is state it cannot be assumed to still hold.
+        _plan.ForgetWhatWasSent(e.Peer.Key);
 
-            if (_dictation.State == DictationState.Transcribing)
-                return new PhoneStreamOutcome(false, "mTiles is still working out the previous recording.");
+        RememberWhetherPaired(true);
+        StateChanged?.Invoke();
+    }
 
-            if (_dictation.State != DictationState.Idle)
-                return new PhoneStreamOutcome(false, "mTiles is already recording.");
-
-            var tile = _activeTile();
-            var focused = SafeFocusedElement();
-            _streamTile = tile;
-            _tileName = SafeTileName();
-
-            var forPhone = PhoneDelivery(_settings.Settings);
-
-            bool started;
-            try
-            {
-                // Prepared before the route is armed and before the service is asked to start, because
-                // audio is already on its way: the phone sends "begin" and then frames, without waiting
-                // for a reply. Inside the try, because this throws too — a disposed capture, a rate the
-                // resampler will not take — and an escape from here reaches Kestrel as an unhandled
-                // exception instead of the phone as a refusal.
-                _router.Phone.PrepareForStream(sampleRate);
-                _router.RouteNextToPhone();
-
-                started = _dictation.Start(tile ?? (object)"phone",
-                text =>
-                {
-                    // To the phone that spoke, and only that one. Broadcasting it put one person's
-                    // dictation on every paired device's screen — a second phone in the room, or the
-                    // browser left open on the near machine, would have shown it. It is shown at all
-                    // because whoever is holding the phone is usually not looking at the computer, and
-                    // "nothing happened" is otherwise indistinguishable from "it did not hear you".
-                    _server?.SendToStreamOwner(
-                        JsonSerializer.Serialize(new { type = "text", message = text }));
-                    return DictationTextSink.Insert(tile, text, forPhone, focused);
-                });
-
-            }
-            catch (Exception ex)
-            {
-                // The armed route is the thing that must not survive this. It is a one-shot flag that the
-                // next Start consumes, so leaving it set sends the user's *own* microphone press to a
-                // phone capture with nothing in it — local dictation quietly broken until somebody
-                // happens to dictate from a phone again.
-                _router.CancelPhoneRoute();
-                _streamTile = null;
-                Trace.TraceWarning("Starting a phone dictation failed: {0}", ex);
-                return new PhoneStreamOutcome(false, "Dictation could not be started on the computer.");
-            }
-
-            if (started)
-                return PhoneStreamOutcome.Ok;
-
-            _router.CancelPhoneRoute();
-            _streamTile = null;
-            return new PhoneStreamOutcome(false, "Dictation could not be started on the computer.");
-        });
-
-    void IPhoneSink.Write(ReadOnlySpan<byte> pcm) => _router.Phone.Write(pcm);
-
-    Task IPhoneSink.EndAsync()
+    private void OnPeerLeft(object? sender, PeerLeftEventArgs e)
     {
         _dispatcher.Post(() =>
         {
-            if (_dictation.State == DictationState.Recording && _router.IsRecordingFromPhone)
-                _dictation.Stop();
+            // A recording whose phone has gone will never be ended by it.
+            _phoneDictation.CancelIfFrom(e.Peer);
         });
-        return Task.CompletedTask;
+        StateChanged?.Invoke();
     }
 
-    void IPhoneSink.CancelStream() => _dispatcher.Post(() =>
+    /// <summary>Written to settings, because it decides whether the link starts with the application —
+    /// before there is a link to ask.</summary>
+    private void RememberWhetherPaired(bool paired)
     {
-        if (_dictation.State == DictationState.Recording && _router.IsRecordingFromPhone)
-            _dictation.Cancel();
-
-        _router.CancelPhoneRoute();
-        _streamTile = null;
-    });
-
-    /// <remarks>
-    /// Asks <see cref="AddressedTile"/> and the focused control at the moment the key is pressed, rather
-    /// than reusing whatever the last recording aimed at: half a minute passes between dictating a line
-    /// and sending it, and the user may well have switched tiles in between. Inside an utterance that
-    /// same call answers with the tile the sentence is landing in, which is what makes the two halves of
-    /// one gesture agree even if the active tile moves between them.
-    /// </remarks>
-    Task<string?> IPhoneSink.PressKeyAsync(TileKey key) =>
-        _dispatcher.InvokeAsync<string?>(() =>
+        _dispatcher.Post(() =>
         {
-            LeafTileNodeViewModel? tile;
-
-            // Wrapped for the reason BeginAsync is, and then some. Pressing the key ends in a
-            // RaiseEvent, which runs the application's own KeyDown handlers — the Goal tile's answer
-            // box, its plan box, anything bubbling up to the window — synchronously and on this thread.
-            // A throw from any of them is captured into this task, returns to the socket thread, passes
-            // both catches in PumpAsync (neither is a WebSocketException or a cancellation) and reaches
-            // Kestrel, which drops the connection: the phone blinks "Offline" and reconnects, over a
-            // keystroke, with nothing anywhere saying why. SafeTileName wraps the very same
-            // AddressedTile call one method down for the smaller half of this.
-            try
-            {
-                tile = AddressedTile();
-                if (PhoneKeys.Press(tile, key, SafeFocusedElement()))
-                    return null;
-            }
-            catch (Exception ex)
-            {
-                // Not reported as delivered. Whether the key reached anything before the handler threw
-                // is unknowable from here, and the honest answer to the phone is that it did not work —
-                // pressing again is cheap, and silence would have the user press again anyway.
-                Trace.TraceWarning("Pressing a key from a phone failed: {0}", ex);
-                return "mTiles could not deliver that key.";
-            }
-
-            // One sentence, and it names the thing the user can act on. "It did not work" sends somebody
-            // holding a phone back to the computer to guess which of several things was wrong. A
-            // terminal tile that refused is a terminal whose shell has ended — a live one always takes
-            // the key, and a focused text box would have taken it before the tile was consulted at all.
-            return tile switch
-            {
-                null => "No tile is active in mTiles.",
-                { Content: TerminalTileViewModel } => "The shell in that tile is not running.",
-                _ => "That tile has nothing to type into.",
-            };
+            if (_settings.Settings.Phone.HasPairedDevices == paired) return;
+            _settings.Settings.Phone.HasPairedDevices = paired;
+            _settings.NotifyChanged();
         });
+    }
 
-    /// <remarks>
-    /// The tile is resolved here, on the UI thread and through <see cref="AddressedTile"/> — the same
-    /// call the list was built from, so the tile named on the phone is the tile the press reaches — and
-    /// the action is looked up in what it offers <em>now</em>, because the phone's snapshot is as old as
-    /// the last state it was told about. An id that is not in that list, or is in it and disabled, or is
-    /// destructive, is refused: what a paired device can cause is decided in this process, not by the
-    /// message.
-    /// </remarks>
-    Task<string?> IPhoneSink.InvokeActionAsync(string id) =>
+    // ── requests ────────────────────────────────────────────────────────────────────────────────
+
+    private async Task<ReadOnlyMemory<byte>> HandleRequestAsync(ILinkPeer peer, ReadOnlyMemory<byte> body,
+        CancellationToken cancellationToken)
+    {
+        if (PhoneProtocol.Parse(body.Span) is not { } request)
+            return PhoneProtocol.Error("mTiles did not understand that.");
+
+        try
+        {
+            return await AnswerAsync(peer, request).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // An exception out of here reaches the phone as a failed handler and nothing else; logged
+            // here, it at least says which request and why.
+            Trace.TraceWarning("A phone request ({0}) failed: {1}", request.GetType().Name, ex);
+            return PhoneProtocol.Error("mTiles could not do that.");
+        }
+    }
+
+    private async Task<byte[]> AnswerAsync(ILinkPeer peer, PhoneRequest request)
+    {
+        switch (request)
+        {
+            case HelloRequest hello:
+                var session = await _dispatcher.InvokeAsync(SessionSnapshot).ConfigureAwait(false);
+                return PhoneProtocol.Ok(new
+                {
+                    ok = true,
+                    protocol = PhoneProtocol.Version,
+                    compatible = hello.Protocol == PhoneProtocol.Version,
+                    app = "mTiles",
+                    version = AppInfo.Version,
+                    machine = Environment.MachineName,
+                    // What a card's "changed at" is measured against: the phone's clock is not this one.
+                    now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    session,
+                });
+
+            case UnpairRequest:
+                // Answered first and forgotten a moment later: forgetting drops the session this answer
+                // travels on, and a phone left without one cannot tell a logout from a lost connection.
+                _ = ForgetAfterAnsweringAsync(peer);
+                return PhoneProtocol.Ok();
+
+            case WorkspacesRequest:
+                return PhoneProtocol.Ok(new { ok = true, workspaces = await _dispatcher.InvokeAsync(_workspaces.List).ConfigureAwait(false) });
+
+            case LayoutRequest layout:
+                return await _dispatcher.InvokeAsync(() => _workspaces.Layout(layout.WorkspaceId)).ConfigureAwait(false) is { } found
+                    ? PhoneProtocol.Ok(new { ok = true, layout = found })
+                    : PhoneProtocol.Error("That workspace is not open in mTiles.");
+
+            case OpenWorkspaceRequest open:
+                return await _dispatcher.InvokeAsync(() => _workspaces.Open(open.WorkspaceId)).ConfigureAwait(false)
+                    ? PhoneProtocol.Ok()
+                    : PhoneProtocol.Error("That workspace is no longer in mTiles.");
+
+            case WatchRequest watch:
+                _plan.Watch(peer.Key, watch.WorkspaceId, watch.TileId);
+                _ = PushNowAsync();
+                return PhoneProtocol.Ok();
+
+            case TileRequest tile:
+                return await _dispatcher.InvokeAsync(() => _workspaces.Find(tile.TileId) is { } hit
+                        ? PhoneTiles.Describe(hit.Tile, hit.WorkspaceId)
+                        : null).ConfigureAwait(false) is { } view
+                    ? PhoneProtocol.Ok(new { ok = true, tile = view })
+                    : PhoneProtocol.Error("That tile is no longer there.");
+
+            case TileCommandRequest command:
+                return await RunTileCommandAsync(command).ConfigureAwait(false) is { } refusal
+                    ? PhoneProtocol.Error(refusal)
+                    : PhoneProtocol.Ok();
+
+            case ActionRequest action:
+                return await StartActionAsync(peer, action).ConfigureAwait(false) is { } why
+                    ? PhoneProtocol.Error(why)
+                    : PhoneProtocol.Ok();
+
+            default:
+                return PhoneProtocol.Error("mTiles did not understand that.");
+        }
+    }
+
+    private Task<string?> RunTileCommandAsync(TileCommandRequest request) =>
         _dispatcher.InvokeAsync(async () =>
         {
-            LeafTileNodeViewModel? tile;
+            if (_workspaces.Find(request.TileId) is not { } hit)
+                return "That tile is no longer there.";
+
+            // Wrapped: this runs the tile's own code, synchronously on this thread — a key press ends in a
+            // RaiseEvent through the application's own handlers — and a throw from any of it must cost the
+            // phone a sentence, not the request.
             try
             {
-                tile = AddressedTile();
+                var result = await PhoneTiles.HandleAsync(hit.Tile, request.Command).ConfigureAwait(true);
+                _ = PushNowAsync();
+                return result;
             }
             catch (Exception ex)
             {
-                Trace.TraceWarning("Reading the addressed tile for a phone action failed: {0}", ex);
-                return "mTiles could not reach the active tile.";
-            }
-
-            if (tile is null)
-                return "No tile is active in mTiles.";
-
-            if (!PhoneTileActions.IsAllowed(tile.Actions, id))
-                return "That is not something this tile can do right now.";
-
-            // Wrapped for the reason the key press is: this runs the tile's own command, which is
-            // ordinary application code, and an exception escaping here reaches Kestrel and drops the
-            // connection — the phone blinks "Offline" and reconnects, with nothing anywhere saying why.
-            try
-            {
-                var result = await tile.InvokeActionAsync(id).ConfigureAwait(true);
-                PublishState();
-                return result.Done ? null : result.Message ?? "mTiles could not do that.";
-            }
-            catch (Exception ex)
-            {
-                Trace.TraceWarning("Running a tile action from a phone failed: {0}", ex);
+                Trace.TraceWarning("A phone command in a tile failed: {0}", ex);
                 return "mTiles could not do that.";
             }
         }).Unwrap();
 
-    string IPhoneSink.DescribeState()
-    {
-        // Answers immediately from the cache — this is a socket thread and the phone is waiting — and
-        // asks for a fresh reading, which arrives a frame later as an ordinary state message.
-        PublishState();
-        return StateJson();
-    }
-
     /// <summary>
-    /// The application saying that what a phone is looking at has changed: another tile is active, or the
-    /// active one's own state moved.
+    /// Starts a tile action and answers as soon as it has been checked, not when it has finished.
     /// </summary>
     /// <remarks>
-    /// Pushed in rather than observed from here, and that is the layering: this class is handed a
-    /// <c>Func</c> that reads the active tile and knows nothing else about the view model tree, so it is
-    /// the composition root that connects the two — the same place the <c>Func</c> itself is written.
-    /// Without it the action list only ever moved when somebody dictated, which is the wrong way round:
-    /// the run whose Continue has just lit up is exactly the one the user is watching from the sofa.
+    /// A tile action is the one thing a phone can ask for that is not short: Continue on a Goal tile runs
+    /// the whole implement/review loop, minutes of it, and a request waiting on that would time out on the
+    /// phone long before. What the phone needs to know at once is whether it was allowed; how it ended is
+    /// pushed to it afterwards if it failed. The id is checked against what the tile offers <em>now</em>
+    /// (<see cref="PhoneTileActions.IsAllowed"/>), so an action already running is refused for being
+    /// disabled rather than queued behind itself.
     /// </remarks>
-    internal void NotifyActiveTileChanged() => PublishState();
+    private Task<string?> StartActionAsync(ILinkPeer peer, ActionRequest request) =>
+        _dispatcher.InvokeAsync<string?>(() =>
+        {
+            if (_workspaces.Find(request.TileId) is not { } hit)
+                return "That tile is no longer there.";
 
-    string IPhoneSink.DescribeActions()
+            if (!PhoneTileActions.IsAllowed(hit.Tile.Actions, request.ActionId))
+                return "That is not something this tile can do right now.";
+
+            _ = RunActionAsync(peer, hit.Tile, request.ActionId);
+            return null;
+        });
+
+    private async Task RunActionAsync(ILinkPeer peer, LeafTileNodeViewModel tile, string actionId)
     {
-        // Same arrangement as DescribeState: answer from the snapshot, because this is a socket thread,
-        // and ask for a fresh reading that arrives a frame later as an ordinary actions message.
-        PublishState();
-        return _actionsJson;
-    }
-
-    // ── internals ───────────────────────────────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// The settings a phone-driven transcript is composed with.
-    /// </summary>
-    /// <remarks>
-    /// A copy carrying only what <see cref="DictationTextSink.Compose"/> reads, so the phone's own
-    /// auto-Enter preference applies without the stored keyboard settings being mutated — and so nothing
-    /// else about the local configuration can leak into a path it was never set for.
-    /// </remarks>
-    internal static SpeechSettings PhoneDelivery(AppSettings settings) => new()
-    {
-        AutoSubmitEnter = settings.Phone.AutoSubmitEnter,
-        AppendTrailingSpace = settings.Speech.AppendTrailingSpace,
-    };
-
-    /// <summary>Reads the tile name on the UI thread and tells every phone where it stands.</summary>
-    private void PublishState() => _dispatcher.Post(() =>
-    {
-        // Let go of the tile once the utterance is over. Holding it meant the phone kept naming the tile
-        // it had dictated into an hour ago, however many times the user had switched since — and the
-        // whole point of showing a name there is to say where the next thing you say will land.
-        if (_dictation.State == DictationState.Idle)
-            _streamTile = null;
-
-        _tileName = SafeTileName();
-        _actionsJson = SafeActionsJson();
-        Broadcast(StateJson(), ref _lastState);
-        Broadcast(_actionsJson, ref _lastActions);
-    });
-
-    /// <summary>Sends a message to every phone, unless they were told exactly this last time.</summary>
-    /// <remarks>
-    /// The tile republishes its actions on any change to its content at all — deliberately, so no list of
-    /// six kinds' internals is kept anywhere — which for a running Goal tile is once a second as the
-    /// elapsed time ticks. What a phone needs is the message that says something different; the rest is a
-    /// socket write per second per device for a picture that has not moved. A phone that has just
-    /// connected is answered from the snapshot directly, so nothing it needs is lost by holding a repeat
-    /// back. Touched only on the UI thread, where <see cref="PublishState"/> puts it.
-    /// </remarks>
-    private void Broadcast(string message, ref string? lastSent)
-    {
-        if (message == lastSent) return;
-        lastSent = message;
-        _server?.Broadcast(message);
-    }
-
-    private Avalonia.Input.IInputElement? SafeFocusedElement()
-    {
-        try { return FocusedElement?.Invoke(); }
-        catch { return null; }
-    }
-
-    /// <summary>
-    /// The one tile a phone is addressing: what it is shown, and what it presses.
-    /// </summary>
-    /// <remarks>
-    /// <para>Everything the phone sees and everything it can cause comes from here, and that is the
-    /// point. The caption and the action list were built from the tile a stream is aimed at while the
-    /// list was pressed on whichever tile happened to be active — so a phone dictating into Git while
-    /// the user clicked into a Goal tile went on showing Git's name and Git's buttons, and a tap ran the
-    /// Goal tile's command of the same id. The two kinds share <c>commit</c>, so that was "Commit" under
-    /// the name Git #1 starting a Goal tile's run: the filter in <see cref="PhoneTileActions"/> could not
-    /// see it, because it was asked about the tile the press had already been routed to.</para>
-    /// <para>While an utterance is in flight the phone is a remote for the tile the sentence is landing
-    /// in, which is also what makes an Enter land where the sentence did. The hold lasts exactly that
-    /// long — <see cref="PublishState"/> lets go of it the moment dictation is idle — so nothing here
-    /// keeps aiming at a tile somebody dictated into an hour ago.</para>
-    /// <para>UI thread only, like <see cref="_streamTile"/> itself.</para>
-    /// </remarks>
-    private LeafTileNodeViewModel? AddressedTile() => _streamTile ?? _activeTile();
-
-    private string SafeTileName()
-    {
-        try { return AddressedTile()?.TileName ?? ""; }
-        catch { return ""; }
-    }
-
-    /// <summary>What the addressed tile can be asked to do, as a message ready to send.</summary>
-    /// <remarks>The destructive filter is inside <see cref="PhoneTileActions.Describe"/> rather than
-    /// here, so the one rule that decides what a phone may see is also the one that decides what it may
-    /// press. Wrapped for the reason the name is: this reads a live view model tree, and a failure here
-    /// must cost a stale caption rather than the bridge.</remarks>
-    private string SafeActionsJson()
-    {
+        string? why;
         try
         {
-            var tile = AddressedTile();
-            return PhoneTileActions.Describe(tile?.TileName ?? "", tile?.Actions ?? []);
+            var result = await tile.InvokeActionAsync(actionId).ConfigureAwait(true);
+            why = result.Done ? null : result.Message ?? "mTiles could not do that.";
         }
         catch (Exception ex)
         {
-            Trace.TraceWarning("Reading the addressed tile's actions failed: {0}", ex);
-            return PhoneTileActions.Describe("", []);
+            Trace.TraceWarning("Running a tile action from a phone failed: {0}", ex);
+            why = "mTiles could not do that.";
+        }
+
+        if (why is not null)
+            await NotifyAsync(peer, PhoneProtocol.Push("error", new { scope = "action", message = why })).ConfigureAwait(false);
+        _ = PushNowAsync();
+    }
+
+
+    /// <summary>What every phone is told about the application as a whole. UI thread only.</summary>
+    private object SessionSnapshot()
+    {
+        return new
+        {
+            dictation = _phoneDictation.Snapshot(),
+            activeTileId = SafeActiveTileId(),
+        };
+    }
+
+    private void OnDictationChanged() => _ = PushNowAsync();
+
+    private string? SafeActiveTileId()
+    {
+        try { return _workspaces.ActiveTile?.TileId; }
+        catch { return null; }
+    }
+
+    // ── pushing ─────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Samples what each connected phone is looking at and sends whatever has changed since it was last
+    /// told.
+    /// </summary>
+    /// <remarks>
+    /// <para>Sampled, not driven by events, and that is the simpler of two correct designs rather than
+    /// the lazy one: what a phone shows is drawn from half a dozen view models in several kinds of tile,
+    /// and a missed notification anywhere in them is a phone showing yesterday's state with nothing to say
+    /// so. A tile that implements <see cref="IRemoteViewTile"/> says cheaply whether it moved, so the
+    /// expensive part — describing a long conversation — happens only when it did.</para>
+    /// <para>Only while a phone is connected, and one sampling at a time.</para>
+    /// </remarks>
+    internal async Task PushNowAsync()
+    {
+        if (_disposed || _host is not { } host) return;
+        if (Interlocked.Exchange(ref _pushing, 1) == 1) return;
+
+        try
+        {
+            var connected = host.Peers.Where(p => p.IsConnected && !_sending.ContainsKey(p.Key)).ToList();
+            if (connected.Count == 0) return;
+
+            var tick = Interlocked.Increment(ref _tick);
+            var outgoing = await _dispatcher.InvokeAsync(() =>
+                _plan.Collect(connected, PhoneProtocol.Push("session", SessionSnapshot()), full: tick % 4 == 1))
+                .ConfigureAwait(false);
+
+            // Collecting is one at a time; sending is not awaited here, so a phone whose relay has stopped
+            // answering waits out its own timeouts without holding the next sampling — or any other phone.
+            foreach (var o in outgoing)
+                if (o.Messages.Count > 0 && _sending.TryAdd(o.Peer.Key, 0))
+                    _ = SendInOrderAsync(o.Peer, o.Messages);
+        }
+        catch (Exception ex)
+        {
+            // From a timer: an escape here ends the process.
+            Trace.TraceWarning("Updating a phone failed: {0}", ex.Message);
+        }
+        finally
+        {
+            Volatile.Write(ref _pushing, 0);
         }
     }
 
-    private string StateJson()
+    private async Task SendInOrderAsync(ILinkPeer peer, IReadOnlyList<byte[]> messages)
     {
-        var state = _dictation.State switch
+        try
         {
-            DictationState.Recording => "recording",
-            DictationState.Transcribing => "transcribing",
-            _ => "idle",
-        };
-
-        return JsonSerializer.Serialize(new { type = "state", state, tile = _tileName });
-    }
-
-    /// <summary>
-    /// The pinned address for a kind of session. Safe from any thread: the dictionary it reads is only
-    /// ever replaced, never written into.
-    /// </summary>
-    private string? PinnedHostFor(SessionLocation location) =>
-        _settings.Settings.Phone.PinnedHosts.GetValueOrDefault(location.ToString());
-
-    /// <summary>
-    /// Records the address a phone genuinely reached this machine at, under the current kind of session.
-    /// </summary>
-    /// <remarks>
-    /// The one fact in this whole feature that is measured rather than inferred, which is why it outranks
-    /// every heuristic in <see cref="PhoneEndpointRanker"/>. Stored per session location so that a local
-    /// day and a remote day do not overwrite each other's answer — the machine is the same in both, and a
-    /// single remembered winner would be wrong every time the user switched.
-    /// </remarks>
-    private void RememberReachedVia(string host)
-    {
-        var key = _directory.Location.ToString();
-
-        // Posted to the UI thread, and that is not tidiness. This runs on a Kestrel request thread while
-        // the settings graph is a plain Dictionary that the debounced save serialises from elsewhere:
-        // writing a key during that walk throws InvalidOperationException inside the save, on a
-        // thread-pool thread, at a moment nobody would connect to a phone having scanned a QR code.
-        // Every other writer of this file is already on the UI thread; this one joins them.
-        _dispatcher.Post(() =>
-        {
-            var pins = _settings.Settings.Phone.PinnedHosts;
-
-            if (pins.TryGetValue(key, out var existing) &&
-                string.Equals(existing, host, StringComparison.OrdinalIgnoreCase))
-                return;
-
-            // Replaced, not mutated. A lock here only covered this class's own two accesses — and the
-            // third reader is the debounced settings save, which serialises this dictionary from a
-            // thread-pool thread and knows nothing about any lock of ours. Writing a new instance means
-            // whoever is already walking the old one keeps walking something nobody will touch again.
-            _settings.Settings.Phone.PinnedHosts = new Dictionary<string, string>(pins, StringComparer.Ordinal)
+            foreach (var message in messages)
             {
-                [key] = host,
-            };
+                if (await NotifyAsync(peer, message).ConfigureAwait(false)) continue;
 
-            _settings.NotifyChanged();
-            StateChanged?.Invoke();
-        });
+                // The plan recorded these as sent when it collected them; one that did not arrive must be
+                // offered again, or the phone keeps showing what it had until the tile next changes.
+                _plan.ForgetWhatWasSent(peer.Key);
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            // Not awaited by anybody: an escape here would be an unobserved task.
+            Trace.TraceWarning("Updating a phone failed: {0}", ex.Message);
+        }
+        finally
+        {
+            _sending.TryRemove(peer.Key, out _);
+        }
     }
 
-    private string Describe(Exception ex) => ex switch
+    /// <summary>True when the message was delivered.</summary>
+    internal static async Task<bool> NotifyAsync(ILinkPeer peer, byte[] message)
     {
-        // Reached only when even an automatically chosen port could not be bound, since a refused one is
-        // retried. That is a machine-wide problem, not a number the user got wrong.
-        _ when IsPortUnavailable(ex) =>
-            "No port could be opened for the bridge. Something on this machine is blocking it.",
-        _ => ex.Message,
-    };
+        if (!peer.IsConnected) return false;
+
+        // Bounded: a notification waits through a dropped session by design, and a phone that has gone
+        // for good must not hold the push loop behind it.
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        try
+        {
+            await peer.NotifyAsync(message, timeout.Token).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex) when (ex is LinkException or OperationCanceledException)
+        {
+            return false;
+        }
+    }
 
     public async ValueTask DisposeAsync()
     {
         _disposed = true;
 
-        _dictation.StateChanged -= PublishState;
+        _phoneDictation.Changed -= OnDictationChanged;
+        _phoneDictation.Dispose();
         _settings.SettingsChanged -= OnSettingsChanged;
-        System.Net.NetworkInformation.NetworkChange.NetworkAddressChanged -= OnNetworkChanged;
 
-        lock (_reconfigureGate)
-        {
-            _reconfigure?.Dispose();
-            _reconfigure = null;
-        }
-
-        // Not StopAsync: that means "the user turned this off", and forgets the paired devices. Closing
-        // the application is not that decision — treating it as one would have made the stored sessions
-        // pointless, since every run would erase what the last one wrote.
+        // Not an unpairing: closing the application is not the user deciding to forget their phone.
         await _lifecycle.WaitAsync().ConfigureAwait(false);
         try
         {
-            await StopCoreAsync(revokePairings: true, forgetDevices: false).ConfigureAwait(false);
+            await StopCoreAsync().ConfigureAwait(false);
         }
         finally
         {
             _lifecycle.Release();
         }
 
-        _lifecycle.Dispose();
+        // The semaphore is deliberately not disposed: a call that was already waiting on it enters after
+        // this, sees _disposed and releases it, and that release must not throw from an abandoned task.
     }
 }
+
+/// <summary>One paired phone, as the panel lists it.</summary>
+internal sealed record PhoneDevice(ILinkPeer Peer, string Name, bool IsConnected, DateTimeOffset PairedAt,
+    DateTimeOffset LastSeen);
+
+/// <summary>A code on screen: what the QR code carries, and until when.</summary>
+internal sealed record PhoneInvitation(Guid Id, string Url, string Code, DateTimeOffset ExpiresAt);
+
+/// <summary>A refusal worth showing as it stands.</summary>
+internal sealed class PhoneBridgeException(string message) : Exception(message);

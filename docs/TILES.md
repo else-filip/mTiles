@@ -734,15 +734,14 @@ same loop it draws the kind cards with.
 
 ## Tile actions, and the phone
 
-`PhoneBridgeManager` already held a `Func<LeafTileNodeViewModel?>` for the active tile. What was missing
-was anything to ask it for.
+A paired phone can press what a tile offers it, beside the six keys.
 
 ```csharp
 public sealed record TileAction(
     string Id, string Label, string Icon, bool IsEnabled = true, bool IsDestructive = false);
 ```
 
-The phone now asks the active tile what it can do — Git → *Refresh, Commit, Push*; Goal → *Continue,
+The phone asks the tile it has zoomed into what it can do — Git → *Refresh, Commit, Push*; Goal → *Continue,
 Pause, Commit work* — alongside the three fixed keys, which are unchanged. The same list drives the tile
 header's own Restart button and Ctrl+Shift+R (`LeafTileNodeViewModel.CanRestart`), which is what removed
 the last `is TerminalTileViewModel` from `DoRestartTerminal`.
@@ -766,18 +765,13 @@ manager looks it up in the current `Actions` of the tile it addressed, and an un
 answer malformed JSON gets, which is none. In one respect it is stricter than the keys are: an action is
 gated on `IsEnabled` for this tile in this state, whereas Enter can always be pressed.
 
-**One tile answers for the caption, the list and the press** (`PhoneBridgeManager.AddressedTile` — the
-tile a phone-driven dictation is aimed at while an utterance is in flight, and the active tile
-otherwise). The caption and the list were built from the streaming tile while the press went to whichever
-tile happened to be active, and the action buttons are deliberately *not* disabled during a recording:
-switch tiles at the computer mid-sentence and the phone went on showing Git #1 and Git's buttons while a
-tap ran the Goal tile's command. Ids are not unique across kinds — `commit` is Git's and the Goal tile's
-— so that was "Commit" under a Git tile's name starting a Goal run, and the destructive filter could not
-catch it, because it was being asked about the tile the press had already been routed to. Asking one
-function is what makes what a phone sees and what it presses the same thing by construction rather than
-by two call sites agreeing. The hold ends with the utterance (`PublishState` releases it the moment
-dictation is idle), so nothing goes on aiming at a tile somebody dictated into an hour ago — and it is
-also what makes an Enter land where the sentence did when the active tile moved in between.
+**A phone names the tile it means** (`tileId` on every request). It used to address "the tile that is
+active, or the one the recording in flight is aimed at", and that one rule took three paragraphs of
+defence: the caption, the list and the press each had to ask the same function or a Commit under Git's
+name started a Goal run. Now the phone zooms into a tile and every command carries that tile's id; the
+bridge finds it in whichever loaded workspace holds it (`IPhoneWorkspaces.Find`) and the tile the
+phone was shown is the tile it presses, by construction. The desktop's active tile is only the fallback
+for a recording from a phone that has chosen none.
 
 The genuinely new risk is that the set is no longer closed *by kind* — a future tile could expose
 something like Discard changes, and Git has `DiscardChanges` and `UndoLastCommitAsync` today. Hence
@@ -787,60 +781,47 @@ holds that an unwired `ConfirmAction` answers no. The filter lives in `PhoneTile
 tested, never in the page — and it is the *same* function that decides what may be shown and what may be
 pressed, so the two cannot drift.
 
-Three constraints from the existing code, each already paid for once:
+**An action answers when it is allowed, and runs afterwards** (`PhoneBridgeManager.StartActionAsync`).
+It is the one thing a phone can ask for that is not short — Continue on a Goal tile runs the whole
+implement/review loop — and a request waiting on it would time out on the phone long before. A failure
+is pushed to the phone that pressed (`{"type":"error","scope":"action"}`). Nothing here serialises two
+presses, because the tile already does: the id is checked against what it offers **now**
+(`PhoneTileActions.IsAllowed`), so an action already running is refused for being disabled.
 
-- **The action list is assembled on the UI thread and published as an immutable snapshot.**
-  `PhoneBridgeManager` keeps `private volatile string _tileName` for exactly this reason, with a comment
-  calling it *the one place in this class that reached into the UI graph from the network*.
-  `_actionsJson` sits beside it, and more urgently: building it walks the active tile's content and asks
-  each action whether it is enabled right now.
-- **A refusal is its own message type** — `actionError`, not `error` — for the reason `keyError` is its
-  own: the page treats `error` as the answer to *its* dictation attempt and unwinds its optimistic
-  microphone state on one. A refused action must not cancel somebody's recording.
-- **An action is started off the receive loop, never awaited on it**
-  (`PhoneBridgeServer.RunActionAsync`). It is the one thing a phone can ask for that is not short —
-  Continue on a Goal tile runs the whole implement/review loop, and a Git push that fails ends in a
-  message box somebody has to walk over to the computer and click. Awaited in the pump it stops
-  `ReceiveAsync` being called for that connection at all: the audio frames of the sentence spoken
-  meanwhile go nowhere, `begin`, `key` and the next `action` are never parsed, and the phone — still
-  being sent state down the independent write chain — looks perfectly alive. That is the sofa this
-  feature was built for, so the refusal is *posted* when it arrives rather than returned. Nothing here
-  serialises two presses, because the tile already does: the id is checked against what it offers **now**
-  (`PhoneTileActions.IsAllowed`), so an action already running is refused for being disabled.
+### What a phone sees of a tile: `IRemoteViewTile`
 
-**"Pushed" needs something to push it,** and the manager cannot see it happen: it holds a `Func` that
-reads the active tile and nothing else of the view model tree. So the tree says when. A workspace raises
-`ActiveTileChanged` for a tile becoming active, for the active tile's own `Actions` or `TileName` moving,
-and for a root replaced — the last one because "nothing is active" is a state a listener has to be told
-about, being the difference between a stale set of buttons and none. `MainWindowViewModel` follows
-whichever workspace is on screen and re-raises, and `App` wires that to
-`PhoneBridgeManager.NotifyActiveTileChanged` beside the `Func` itself: the bridge keeps no reference to
-the view models and they keep none to it. Without it the list only ever moved when somebody dictated —
-a phone kept Git's buttons under Git's name after the user had clicked into a Goal tile, and a run that
-finished left Continue greyed out on the phone, which is the one thing the feature is for.
+The eighth capability interface, and the same bargain as the other seven: a kind that implements it says
+what it shows on a phone (`DescribeForRemote` → `RemoteTileBody`: a chat, a screen, a status line and a
+composer) and answers what a phone asks of it (`HandleRemoteAsync` → null, or the sentence the phone
+shows). The bridge never learns which kinds exist. Three implement it — the Agent tile (its own
+`ConversationState`, projected by `AgentChatProjection`), the Goal tile (`GoalTileViewModel.Remote.cs`,
+through the very commands its buttons run) and the terminal, whose screen is read as text off the control
+(`TerminalControl.ReadScreenText`). A kind that implements nothing is still drawn in the phone's
+miniature of the layout — a layout with holes in it is not recognisable — and can be zoomed into if it
+takes text (`ITextInputTile`) or offers a phone an action; otherwise it is drawn dimmed
+(`PhoneTiles.IsReachable`, the one rule for both).
 
-A tile republishes its `Actions` on **any** change to its content, deliberately (see
-`LeafTileNodeViewModel.OnContentPropertyChanged`), so a running Goal tile raises this once a second as
-its elapsed time ticks. The broadcast is therefore compared against what was last sent and dropped when
-it is the same message: a phone that has just connected is answered from the snapshot directly, so
-holding a repeat back loses nothing. A tile nobody is aimed at raises nothing at all.
+`RemoteVersion` is the part that is easy to get wrong: it must move whenever `DescribeForRemote` would
+answer differently, because the bridge samples by it and describes a tile only when it moved. The two
+chat tiles bump it on every property they raise and on every change to their transcript — conservative,
+and a counter costs nothing, while a missed change is a phone showing a stale answer.
 
-Wire format, pushed rather than polled:
+Wire format:
 
 ```jsonc
-// server → phone, when the active tile or its state changes
-{ "type": "actions", "tile": "Git#1",
-  "actions": [ { "id": "refresh", "label": "Refresh", "icon": "refresh", "enabled": true } ] }
+// phone → mTiles (a request; answered {"ok":true} or {"ok":false,"error":"…"})
+{ "type": "action", "tileId": "…", "id": "continue" }
+{ "type": "choose", "tileId": "…", "pendingId": "…", "optionId": "Accept" }
 
-// phone → server
-{ "type": "action", "id": "refresh" }
-{ "type": "actionError", "message": "…" }
+// mTiles → phone (pushed, for the tile the phone watches)
+{ "type": "tile", "tile": { "tileId": "…", "view": "chat", "status": {…}, "chat": {…},
+  "actions": [ { "id": "continue", "label": "Continue", "icon": "play", "enabled": true } ] } }
 ```
 
 `PhoneKeys` keeps only the wire names and the routing. Enter and the arrows are not tile actions — they
-are the keyboard, routed by `DictationTextSink`'s rule (a focused text control first, then the active
-tile's own input surface), and that rule has to stay one rule or a dictated sentence and the Enter that
-submits it can part company. What a key *is* to a control moved onto the tile
+are the keyboard, delivered to the tile the phone names — `ITextInputTile.TryPressKey`, or the tile's own
+`HandleRemoteAsync` — and a dictated sentence goes to that same tile, so a sentence and the Enter that
+submits it cannot part company. What a key *is* to a control moved onto the tile
 (`ITextInputTile.TryPressKey`), because the answer depends on DECCKM and win32-input-mode — two modes the
 terminal control owns and does not expose.
 

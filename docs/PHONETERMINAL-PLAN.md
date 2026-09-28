@@ -1,5 +1,11 @@
 # Phone terminal — the plan
 
+> **Superseded in part (2026-09-25).** The transport this plan builds on — Kestrel, `PhoneBridgeServer`,
+> the WebSocket — is gone: the phone now reaches mTiles through tailcat-link's relays and the page is a
+> static site (ADR [0006](adr/0006-phone-over-relays.md)). A terminal tile already shows its screen as
+> text there (`TerminalControl.ReadScreenText`); what this plan adds beyond that — a live VT stream and a
+> terminal emulator in the page — would now be a channel on the link rather than a WebSocket.
+
 **Status:** plan only, nothing built. The findings it rests on were read out of the code on 2026-09-01
 (mTiles at 0.4.7, `Terminal.Avalonia` 0.3.0 sources) — file references are to those trees.
 

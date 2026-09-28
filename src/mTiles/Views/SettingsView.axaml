@@ -1308,32 +1308,17 @@
                     <TextBlock Text="PHONE" Classes="section" Margin="0" />
                     <Border Classes="settings-group">
                         <StackPanel Spacing="10">
-                            <TextBlock Text="Dictate into a tile from a phone on your network, or from a browser on the machine in front of you. Open the panel from the QR button beside this Settings button. Recognition still runs on this machine; the audio travels encrypted between your own two devices."
+                            <TextBlock Text="Follow and answer your agents, and dictate into a tile, from a phone anywhere — no port is opened. Pair it from the QR button beside this Settings button. Both ends connect out to Tailscale's public relays, which pass on encrypted bytes they cannot read; recognition still runs on this machine."
                                        FontSize="{DynamicResource FontXs}"
                                        Foreground="{DynamicResource TextMuted}"
                                        TextWrapping="Wrap" />
                             <DockPanel>
-                                <TextBlock Text="Keep running" Classes="label"
+                                <TextBlock Text="Keep connected" Classes="label"
                                            VerticalAlignment="Center" Width="120" />
                                 <StackPanel>
                                     <ToggleSwitch IsChecked="{Binding PhoneEnabled}"
                                                   OnContent="On" OffContent="Off" />
-                                    <TextBlock Text="Off: the bridge listens only while the QR panel is open or a phone is paired. On: it starts with mTiles, so a paired phone reconnects on its own."
-                                               FontSize="{DynamicResource FontXs}"
-                                               Foreground="{DynamicResource TextMuted}"
-                                               TextWrapping="Wrap" />
-                                </StackPanel>
-                            </DockPanel>
-                            <DockPanel>
-                                <TextBlock Text="Port" Classes="label"
-                                           VerticalAlignment="Center" Width="120" />
-                                <StackPanel>
-                                    <NumericUpDown Classes="setting"
-                                                   Value="{Binding PhonePort}"
-                                                   Minimum="0" Maximum="65535"
-                                                   Increment="1"
-                                                   FormatString="0" />
-                                    <TextBlock Text="0 picks a free port automatically. Any other number is a preference: if Windows has reserved it — Hyper-V and WSL claim blocks of ports at boot — the bridge quietly takes a free one instead and the panel says which. Applied a moment after you stop typing; the bridge restarts and any QR code on screen must be scanned again."
+                                    <TextBlock Text="With a phone paired, mTiles always connects to the relay so the phone can reach it. On: it also connects when nothing is paired yet. Off: only while the QR panel is open."
                                                FontSize="{DynamicResource FontXs}"
                                                Foreground="{DynamicResource TextMuted}"
                                                TextWrapping="Wrap" />

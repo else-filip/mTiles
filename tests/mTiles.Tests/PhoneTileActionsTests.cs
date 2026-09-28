@@ -1,4 +1,3 @@
-using System.Text.Json;
 using mTiles.Services.Phone;
 using mTiles.ViewModels;
 using Xunit;
@@ -79,32 +78,40 @@ public sealed class PhoneTileActionsTests
         Assert.False(PhoneTileActions.IsAllowed([], "refresh"));
     }
 
-    /// <summary>The wire format, which the page is written against.</summary>
+    /// <summary>What a tile, zoomed into on a phone, offers to press: the same filtered list, so the one
+    /// rule decides both what a phone sees and what it may press.</summary>
     [Fact]
-    public void The_snapshot_carries_the_tile_and_what_it_can_do()
+    public void A_zoomed_in_tile_offers_only_what_a_phone_may_press()
     {
-        using var document = JsonDocument.Parse(
-            PhoneTileActions.Describe("Git#1", [Refresh, Discard]));
+        var leaf = new LeafTileNodeViewModel("stub", new ActionsOnly([Refresh, Discard, Disabled]), "",
+            new TileActivationScope()) { TileName = "Git#1" };
 
-        var root = document.RootElement;
-        Assert.Equal("actions", root.GetProperty("type").GetString());
-        Assert.Equal("Git#1", root.GetProperty("tile").GetString());
+        var view = PhoneTiles.Describe(leaf, "ws");
 
-        var actions = root.GetProperty("actions");
-        Assert.Equal(1, actions.GetArrayLength());
-        Assert.Equal("refresh", actions[0].GetProperty("id").GetString());
-        Assert.Equal("Refresh", actions[0].GetProperty("label").GetString());
-        Assert.True(actions[0].GetProperty("enabled").GetBoolean());
+        Assert.Equal("Git#1", view.Name);
+        Assert.Equal("none", view.View);
+        Assert.Equal(["refresh", "commit"], view.Actions.Select(a => a.Id));
+        Assert.False(view.Actions.Single(a => a.Id == "commit").Enabled);
+        Assert.True(PhoneTiles.IsReachable(leaf));
     }
 
-    /// <summary>A tile with nothing to offer still produces a message, so the page clears the row it
-    /// was showing for the tile before it.</summary>
+    /// <summary>A tile with nothing a phone may do is drawn in the miniature and cannot be zoomed into.
+    /// </summary>
     [Fact]
-    public void A_tile_with_no_actions_still_says_so()
+    public void A_tile_with_nothing_for_a_phone_cannot_be_zoomed_into()
     {
-        using var document = JsonDocument.Parse(PhoneTileActions.Describe("", []));
+        var leaf = new LeafTileNodeViewModel("stub", new ActionsOnly([Discard]), "", new TileActivationScope());
 
-        Assert.Equal(0, document.RootElement.GetProperty("actions").GetArrayLength());
+        Assert.False(PhoneTiles.IsReachable(leaf));
+    }
+
+    private sealed class ActionsOnly(IReadOnlyList<TileAction> actions) : ITileActions
+    {
+        public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged { add { } remove { } }
+        public string KindId => "stub";
+        public IReadOnlyList<TileAction> Actions => actions;
+        public Task<TileActionResult> InvokeAsync(string id) => Task.FromResult(TileActionResult.Ok);
+        public void Dispose() { }
     }
 
     /// <summary>

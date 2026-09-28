@@ -1,0 +1,192 @@
+using System.Text.Json.Serialization;
+using mTiles.ViewModels;
+
+namespace mTiles.Services.Phone.Remote;
+
+// What a phone is told about this application, as plain records. Everything here is a snapshot taken
+// on the UI thread and serialised off it, so nothing in it may reach back into a view model: a record
+// holding a live collection would be walked by the serialiser on a thread the collection does not
+// belong to.
+//
+// The wire is the page's contract as much as ours — the page is hosted separately and may be newer or
+// older than this build — so a field is added freely and never renamed or repurposed. What changes the
+// meaning of a field is a new PhoneProtocol.Version.
+
+/// <summary>One workspace as the phone's outermost view lists it.</summary>
+/// <param name="Loaded">Whether its tiles exist in this session. A workspace nobody has opened has no
+/// layout to show until it is opened, which switches the desktop to it.</param>
+/// <param name="Current">Whether it is the one on the desktop's screen.</param>
+public sealed record RemoteWorkspace(
+    string Id,
+    string Name,
+    string? Branch,
+    string Activity,
+    bool Loaded,
+    bool Current,
+    bool Favorite);
+
+/// <summary>A workspace's tile tree, drawn by the phone as a miniature of the real one.</summary>
+public sealed record RemoteLayout(string WorkspaceId, string Name, RemoteNode? Root);
+
+/// <summary>One node of <see cref="RemoteLayout"/>.</summary>
+[JsonPolymorphic(TypeDiscriminatorPropertyName = "type")]
+[JsonDerivedType(typeof(RemoteSplit), "split")]
+[JsonDerivedType(typeof(RemoteLeaf), "leaf")]
+public abstract record RemoteNode;
+
+/// <param name="Direction"><c>row</c> when the two children stand side by side, <c>column</c> when one is
+/// above the other — the words CSS flexbox uses, since that is what draws it.</param>
+/// <param name="Ratio">The first child's share, 0–1. A side held at a size in pixels on the desktop
+/// is sent as the share it happens to take now, because the phone is not the same size.</param>
+public sealed record RemoteSplit(string Direction, double Ratio, RemoteNode First, RemoteNode Second) : RemoteNode;
+
+/// <param name="Reachable">Whether the phone can zoom into it. A tile it cannot is still drawn — the
+/// layout would not be recognisable with holes in it — but dimmed and not tappable.</param>
+/// <param name="Preview">What the miniature's card says about the tile without zooming in, or null for a
+/// kind with nothing to say.</param>
+public sealed record RemoteLeaf(
+    string TileId,
+    string Kind,
+    string Name,
+    string Activity,
+    bool Active,
+    bool Reachable,
+    RemotePreview? Preview = null) : RemoteNode;
+
+/// <summary>A tile at a glance, as its card in the miniature draws it.</summary>
+/// <param name="Text">One line: what it is doing, what it is asking, or what it last said.</param>
+/// <param name="ContextPercent">How full an agent's context is, 0–100, where known.</param>
+/// <param name="ChangedAt">When the tile last did something, in Unix milliseconds on this machine's clock —
+/// the page corrects for its own with the <c>now</c> the hello answer carries. Null where nothing
+/// knows.</param>
+public sealed record RemotePreview(string? Text, double? ContextPercent = null, long? ChangedAt = null);
+
+/// <summary>What a tile says about itself for its card — see <see cref="RemotePreview"/>.</summary>
+/// <param name="ChangedAt">When the tile knows it — a conversation's last entry — or null, and the bridge
+/// then stamps the moment it sees <paramref name="Text"/> change.</param>
+public sealed record TilePreview(string? Text, double? ContextPercent = null, DateTimeOffset? ChangedAt = null);
+
+/// <summary>One tile, zoomed into.</summary>
+/// <param name="View">Which body the page draws: <c>chat</c>, <c>terminal</c>, or <c>none</c> for a
+/// tile that offers only actions.</param>
+public sealed record RemoteTileView(
+    string TileId,
+    string WorkspaceId,
+    string Name,
+    string Kind,
+    string View,
+    RemoteStatus Status,
+    RemoteChat? Chat,
+    RemoteScreen? Screen,
+    RemoteComposer Composer,
+    IReadOnlyList<RemoteAction> Actions);
+
+/// <summary>What the content of a tile says about itself — the part of <see cref="RemoteTileView"/>
+/// the tile knows and its leaf does not.</summary>
+public sealed record RemoteTileBody(
+    string View,
+    RemoteStatus Status,
+    RemoteChat? Chat = null,
+    RemoteScreen? Screen = null,
+    RemoteComposer? Composer = null);
+
+/// <param name="Text">One line saying what the tile is doing, or null.</param>
+/// <param name="Detail">What it runs on — an agent's model, a goal's phase — or null.</param>
+/// <param name="ContextPercent">How full the model's context is, 0–100, or null where not known.</param>
+public sealed record RemoteStatus(string Activity, string? Text = null, string? Detail = null,
+    double? ContextPercent = null);
+
+/// <param name="Omitted">How many older items were left out; the page says so rather than showing a
+/// conversation that seems to begin half way through.</param>
+public sealed record RemoteChat(
+    IReadOnlyList<RemoteChatItem> Items,
+    int Omitted,
+    RemotePending? Pending,
+    IReadOnlyList<RemotePlanStep>? Plan);
+
+/// <param name="Role"><c>user</c>, <c>assistant</c>, <c>system</c>, <c>work</c>, <c>plan</c>,
+/// <c>notice</c> or <c>questions</c>.</param>
+/// <param name="Markdown">Whether <paramref name="Text"/> is the tool's own markdown. Text this
+/// application composed is plain, and its columns are made of spaces.</param>
+/// <param name="Tone"><c>info</c>, <c>warning</c>, <c>error</c> or <c>summary</c>; null for none.</param>
+public sealed record RemoteChatItem(
+    string Id,
+    string Role,
+    string Text,
+    bool Markdown = false,
+    bool Streaming = false,
+    IReadOnlyList<RemoteWorkLine>? Work = null,
+    string? Tone = null);
+
+/// <param name="State"><c>running</c>, <c>done</c>, <c>failed</c> or <c>declined</c>.</param>
+public sealed record RemoteWorkLine(string Title, string State);
+
+/// <summary>What a tile is waiting for somebody to answer.</summary>
+/// <param name="Kind"><c>approval</c>, <c>questions</c>, <c>plan</c> or <c>gate</c>.</param>
+/// <param name="Id">What the answer is sent back under, so an answer to a request that has since been
+/// replaced is refused rather than applied to the next one.</param>
+/// <param name="SecondsLeft">For a countdown, how long before the tile carries on by itself.</param>
+public sealed record RemotePending(
+    string Kind,
+    string Id,
+    string Title,
+    string? Detail,
+    IReadOnlyList<RemoteOption> Options,
+    IReadOnlyList<RemoteQuestion>? Questions = null,
+    int? SecondsLeft = null);
+
+/// <param name="Tone"><c>primary</c>, <c>neutral</c> or <c>danger</c>.</param>
+public sealed record RemoteOption(string Id, string Label, string Tone);
+
+public sealed record RemoteQuestion(
+    string Id,
+    string? Header,
+    string Text,
+    IReadOnlyList<string> Options,
+    bool Multi,
+    bool Custom);
+
+/// <param name="Status"><c>pending</c>, <c>running</c> or <c>done</c>.</param>
+public sealed record RemotePlanStep(string Text, string Status);
+
+/// <summary>The terminal's screen as text — the last frame, not the stream that drew it.</summary>
+public sealed record RemoteScreen(IReadOnlyList<string> Lines, string? Title);
+
+public sealed record RemoteAction(string Id, string Label, string Icon, bool Enabled);
+
+/// <param name="Enabled">Whether text can be sent at all right now.</param>
+/// <param name="Keys">Whether the arrow keys and Escape mean anything here — a terminal, not a chat.</param>
+/// <param name="CanInterrupt">Whether a Stop is offered.</param>
+public sealed record RemoteComposer(bool Enabled, string Placeholder, bool Keys = false, bool CanInterrupt = false)
+{
+    public static readonly RemoteComposer None = new(false, "");
+}
+
+/// <summary>Something a phone asks a tile to do.</summary>
+public abstract record RemoteTileCommand;
+
+/// <param name="Submit">Whether it is sent — Enter after it — or only put in the tile's input.</param>
+public sealed record RemoteSendText(string Text, bool Submit) : RemoteTileCommand;
+
+public sealed record RemoteKey(TileKey Key) : RemoteTileCommand;
+
+/// <summary>One of the options of the pending request named <paramref name="PendingId"/>.</summary>
+public sealed record RemoteChoose(string PendingId, string OptionId) : RemoteTileCommand;
+
+/// <summary>Answers to a round of questions, per question id.</summary>
+public sealed record RemoteAnswer(string PendingId, IReadOnlyDictionary<string, IReadOnlyList<string>> Answers)
+    : RemoteTileCommand;
+
+public sealed record RemoteInterrupt : RemoteTileCommand;
+
+/// <summary>The words the wire uses for a tile's activity.</summary>
+public static class RemoteActivity
+{
+    public static string Of(Models.TileActivity activity) => activity switch
+    {
+        Models.TileActivity.Idle => "idle",
+        Models.TileActivity.Working => "working",
+        Models.TileActivity.Blocked => "blocked",
+        _ => "unknown",
+    };
+}

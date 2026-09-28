@@ -395,7 +395,7 @@ never stored as a back-reference.
 
 Default ports **1234** (LM Studio) and **11434** (Ollama). The port is optional: what the user types is
 parsed by one pure function accepting `192.168.1.10`, `host:port`, a full URL and IPv6, filling in the
-default — testable in a table, in the style of `PhoneEndpointRanker`.
+default — testable in a table, in the style of `ChainPolicy`.
 
 Discovery reuses `SubnetScanner`, with four differences from the database version:
 

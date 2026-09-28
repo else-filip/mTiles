@@ -5,6 +5,7 @@ using AvaloniaEdit;
 using mTiles.Models;
 using mTiles.Services.Shells;
 using mTiles.Services.Phone;
+using mTiles.Services.Phone.Remote;
 using mTiles.Services.Speech;
 using mTiles.ViewModels;
 using Terminal.Avalonia;
@@ -30,15 +31,7 @@ public class PhoneKeysTests : IDisposable
 
     private readonly TempSettings _settings = new();
     private readonly List<TerminalControl> _controls = [];
-    private readonly List<PhoneBridgeManager> _managers = [];
-
-    public void Dispose()
-    {
-        foreach (var manager in _managers)
-            manager.DisposeAsync().AsTask().GetAwaiter().GetResult();
-
-        _settings.Dispose();
-    }
+    public void Dispose() => _settings.Dispose();
 
     /// <summary><see cref="Ui.Run(Func{Task})"/>, disposing the terminals the test made on its way out.</summary>
     private void OnUiThread(Func<Task> body) => Ui.Run(async () =>
@@ -215,101 +208,28 @@ public class PhoneKeysTests : IDisposable
     /// The sentence a refused key comes back as names the reason, and a delivered one says nothing.
     /// </summary>
     /// <remarks>
-    /// <para>Between <c>PhoneKeys</c>, which is pinned above, and the server, which is pinned against a
-    /// fake sink, sits the piece that turns "it did not land" into words on a phone screen — and it was
-    /// the only part of this path nothing exercised. The phone is usually the only screen the user is
-    /// looking at, so the difference between three sentences is the difference between walking back to
-    /// the computer and knowing what to do; a Note tile answered with "the shell is not running" would
-    /// send somebody to restart a shell that was never involved.</para>
-    /// <para>Driven through <see cref="IPhoneSink"/> rather than the method, because that is the surface
-    /// the server holds and the one a refusal has to travel back through.</para>
+    /// The phone is usually the only screen the user is looking at, so the difference between two
+    /// sentences is the difference between walking back to the computer and knowing what to do. Driven
+    /// through <see cref="PhoneTiles.HandleAsync"/>, the surface a phone's command reaches the tile by.
     /// </remarks>
     [Fact]
     public void A_refused_key_comes_back_as_the_reason_it_was_refused()
         => OnUiThread(async () =>
         {
-            var manager = Manager(out var active);
-
-            active.Tile = null;
-            Assert.Equal("No tile is active in mTiles.", await Press(manager, TileKey.Enter));
-
             var (terminal, control, pty) = TerminalTile();
-            active.Tile = terminal;
-            Assert.Null(await Press(manager, TileKey.Enter));
+            Assert.Null(await PhoneTiles.HandleAsync(terminal, new RemoteKey(TileKey.Enter)));
             await WaitUntil(() => pty.Written.Length > 0, "the shell has been sent something");
 
             pty.EndProcess();
             await WaitUntil(() => !control.IsRunning, "the session has been reported dead");
-            Assert.Equal("The shell in that tile is not running.", await Press(manager, TileKey.Enter));
+            Assert.Equal("The shell in this tile is not running.",
+                await PhoneTiles.HandleAsync(terminal, new RemoteKey(TileKey.Enter)));
 
-            // Anything that is not a terminal at all. The two refusals are deliberately different
-            // sentences: one names a shell to restart, the other says the tile was never a destination.
-            active.Tile = new LeafTileNodeViewModel(TileKindIds.Note, null, "", new TileActivationScope());
-            Assert.Equal("That tile has nothing to type into.", await Press(manager, TileKey.Enter));
+            // Anything that is not a destination at all says so, rather than naming a shell to restart.
+            var note = new LeafTileNodeViewModel(TileKindIds.Note, null, "", new TileActivationScope());
+            Assert.Equal("That tile cannot do that from a phone.",
+                await PhoneTiles.HandleAsync(note, new RemoteKey(TileKey.Enter)));
         });
-
-    /// <summary>
-    /// A handler that throws costs the keystroke and nothing else.
-    /// </summary>
-    /// <remarks>
-    /// Pressing the key ends in a <c>RaiseEvent</c>, which runs the application's own KeyDown handlers
-    /// on this thread. Unwrapped, a throw from any of them is captured into the task, returns to the
-    /// socket thread, passes both catches in the server's pump — neither is a cancellation or a
-    /// <c>WebSocketException</c> — and reaches Kestrel, which drops the connection: the phone blinks
-    /// "Offline" and reconnects, over a keystroke, with nothing anywhere saying why.
-    /// </remarks>
-    [Fact]
-    public void A_handler_that_throws_does_not_cost_the_connection()
-        => OnUiThread(async () =>
-        {
-            var manager = Manager(out var active);
-            var (terminal, _, _) = TerminalTile();
-            active.Tile = terminal;
-
-            var box = new TextBox();
-            ShowingWindow(box);
-            box.KeyDown += (_, _) => throw new InvalidOperationException("a handler somewhere");
-            manager.FocusedElement = () => box;
-
-            // Not reported as delivered: whether the key reached anything before the handler threw is
-            // unknowable from here, and the honest answer is that it did not work.
-            Assert.Equal("mTiles could not deliver that key.", await Press(manager, TileKey.Enter));
-        });
-
-    /// <summary>Whatever the test says is the active tile, read at the moment of the press.</summary>
-    private sealed class ActiveTile
-    {
-        public LeafTileNodeViewModel? Tile { get; set; }
-    }
-
-    private static Task<string?> Press(PhoneBridgeManager manager, TileKey key) =>
-        ((IPhoneSink)manager).PressKeyAsync(key);
-
-    /// <summary>
-    /// A manager with nothing running in it.
-    /// </summary>
-    /// <remarks>
-    /// The bridge is never started here: pressing a key touches the active tile and the focused control
-    /// and nothing else, so there is no server, no certificate and no port to arrange. The dispatcher
-    /// runs inline because this already is the UI thread.
-    /// </remarks>
-    private PhoneBridgeManager Manager(out ActiveTile active)
-    {
-        var holder = new ActiveTile();
-        active = holder;
-
-        var router = new RoutedAudioCapture(new IdleMicrophone(), new PhoneAudioCapture());
-        var manager = new PhoneBridgeManager(
-            _settings.Service,
-            new DictationService(_settings.Service, router),
-            router,
-            activeTile: () => holder.Tile,
-            dispatcher: new InlineUiDispatcher(),
-            sessionStore: new NowherePhoneSessionStore());
-
-        _managers.Add(manager);
-        return manager;
-    }
 
     // ── the wire names ──────────────────────────────────────────────────────────────────────────────
 

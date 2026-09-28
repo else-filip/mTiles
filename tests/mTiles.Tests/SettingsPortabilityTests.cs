@@ -169,12 +169,12 @@ public class SettingsPortabilityTests : IDisposable
         var service = new SettingsService(Path.Combine(_dir.Path, "settings.json"));
         service.Settings.Speech.Hotkey = "Alt+Space";
         service.Settings.Speech.AutoSubmitEnter = false;
-        service.Settings.Phone.Port = 1;
+        service.Settings.Phone.AutoSubmitEnter = false;
 
         var incoming = new AppSettings();
         incoming.Speech.Hotkey = "Ctrl+Alt+D";
         incoming.Speech.AutoSubmitEnter = true;
-        incoming.Phone.Port = 4321;
+        incoming.Phone.AutoSubmitEnter = true;
         var path = Path.Combine(_dir.Path, "in.json");
         SettingsPortability.Export(incoming, path);
 
@@ -188,11 +188,32 @@ public class SettingsPortabilityTests : IDisposable
 
         Assert.Equal("Ctrl+Alt+D", vm.SpeechHotkey);
         Assert.True(vm.SpeechAutoSubmit);
-        Assert.Equal(4321, vm.PhonePort);
+        Assert.True(vm.PhoneAutoSubmit);
 
         // And the page did not save its old copy back on the way through.
         Assert.Equal("Ctrl+Alt+D", service.Settings.Speech.Hotkey);
-        Assert.Equal(4321, service.Settings.Phone.Port);
+        Assert.True(service.Settings.Phone.AutoSubmitEnter);
+    }
+
+    /// <summary>The phone page and whether a phone is paired are this machine's, whatever the file says.
+    /// </summary>
+    /// <remarks>The page is where a pairing code goes: taken from a file, it would hand the keyboard of
+    /// every terminal to whatever page that file named.</remarks>
+    [Fact]
+    public void Import_keeps_this_machines_phone_link()
+    {
+        var service = new SettingsService(Path.Combine(_dir.Path, "settings.json"));
+        var ownPage = service.Settings.Phone.PageUrl;
+        service.Settings.Phone.HasPairedDevices = true;
+
+        var incoming = new AppSettings();
+        incoming.Phone.PageUrl = "https://attacker.example/phone/";
+        incoming.Phone.HasPairedDevices = false;
+
+        service.Replace(incoming);
+
+        Assert.Equal(ownPage, service.Settings.Phone.PageUrl);
+        Assert.True(service.Settings.Phone.HasPairedDevices);
     }
 
     /// <summary>A file that is not settings answers with a reason rather than throwing at the picker.
