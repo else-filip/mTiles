@@ -342,22 +342,47 @@ ol.plan li.step-done::before { content: "● "; color: var(--ok); }
 .dock-row button { flex: none; width: 42px; min-height: 42px; padding: 0; display: grid; place-items: center; }
 .dock-row .tool { background: none; border-color: transparent; color: var(--muted); width: 34px; }
 .dock-row .tool.on { color: var(--strong); background: var(--raised); }
-.dock-row .stop { color: var(--danger); }
 
 .mic { border-radius: 50%; }
 .mic.recording { background: var(--danger); border-color: var(--danger); color: var(--accent-ink); transform: scale(1.12); }
 
-.keys { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
-.key { padding: 0; min-height: 44px; display: grid; place-items: center; font-size: var(--fs-sm); }
-.dock-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+/* Two rows of five: every key a thumb-width wide, none hidden behind a scroll. */
+.keys { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; }
+.key { padding: 0; min-height: 40px; display: grid; place-items: center; font-size: var(--fs-sm); }
+.key.warn { color: var(--warn); }
+.dock-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.dock-chips .chip { flex: none; display: inline-flex; align-items: center; gap: 5px; }
+.dock-chips .chip .icon { width: 15px; height: 15px; }
+.stop-chip { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 50%, var(--edge)); }
+.remote-draft { display: flex; align-items: center; gap: 8px; font-size: var(--fs-sm); }
+.remote-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--body); }
+.muted { color: var(--muted); }
+.mic.recording { animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--danger) 30%, transparent); } }
+
+.msg.user { position: relative; padding-right: 34px; }
+.msg-edit {
+  position: absolute; top: 4px; right: 4px; width: 28px; height: 28px; min-height: 0; padding: 0;
+  display: grid; place-items: center; background: none; border-color: transparent; color: var(--muted);
+}
+.msg-edit .icon { width: 15px; height: 15px; }
+
+.history { display: grid; gap: 6px; max-height: 55vh; overflow: auto; }
+.history-item {
+  text-align: left; white-space: pre-wrap; overflow: hidden; display: -webkit-box;
+  -webkit-line-clamp: 3; -webkit-box-orient: vertical; font-size: var(--fs-sm);
+}
+.toggle { display: flex; align-items: center; gap: 10px; padding: 8px 2px; color: var(--body); }
+.toggle input { width: 20px; height: 20px; accent-color: var(--accent); }
 
 /* ── overlays ───────────────────────────────────────────────────────────────── */
 
 .toast {
-  position: fixed; left: 12px; right: 12px; bottom: calc(92px + env(safe-area-inset-bottom));
+  /* At the top, under the header: at the bottom it covered the keys and the text box it was about. */
+  position: fixed; left: 12px; right: 12px; top: calc(64px + env(safe-area-inset-top)); z-index: 5;
   background: var(--raised); border: 1px solid var(--edge); border-radius: var(--radius);
   padding: 10px 12px; font-size: var(--fs-sm);
-  opacity: 0; pointer-events: none; transform: translateY(6px);
+  opacity: 0; pointer-events: none; transform: translateY(-6px);
   transition: opacity .18s, transform .18s;
 }
 .toast.shown { opacity: 1; transform: none; }
@@ -369,6 +394,7 @@ ol.plan li.step-done::before { content: "● "; color: var(--ok); }
   border-radius: 14px 14px 0 0;
   padding: 16px 12px calc(16px + env(safe-area-inset-bottom));
   display: grid; gap: 8px;
+  max-height: 85vh; overflow: auto;
 }
 .sheet-title { margin: 0 0 4px; color: var(--muted); font-size: var(--fs-sm); }
 .sheet .current { border-color: var(--accent-line); }

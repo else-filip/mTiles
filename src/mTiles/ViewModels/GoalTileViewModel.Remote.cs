@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Collections.Specialized;
 using System.ComponentModel;
 using mTiles.Services;
@@ -45,7 +46,52 @@ public partial class GoalTileViewModel
                 : ShowQuestions ? "Answer above, or type here"
                 : CurrentPhase is Models.GoalPhase.Goal or Models.GoalPhase.Summary ? "Describe the goal"
                 : IsRunning ? "The goal is running" : "Type a message",
-                CanInterrupt: IsRunning && !IsPaused));
+                CanInterrupt: IsRunning && !IsPaused,
+                Draft: InputText.Length > 0 ? InputText : null,
+                Modes: RemoteModes(),
+                StartsOver: StartingOverWouldAskHere()),
+            NewLabel: "New goal");
+    }
+
+    /// <summary>The composer's other sends — the menu beside the desktop's Set goal button, and the two
+    /// detect buttons — offered only where a goal is what the tile is waiting for, as they are there.</summary>
+    /// <remarks>Which of them wants text and which works without it is said rather than decided here: the
+    /// text is the phone's own draft, which this side has not seen.</remarks>
+    private IReadOnlyList<RemoteSendMode>? RemoteModes()
+    {
+        if (!CanSetGoal) return null;
+        var canDetect = CanDetectGoal;
+        return
+        [
+            new RemoteSendMode(RunMode, "Set goal & run", NeedsText: true),
+            new RemoteSendMode(ReviewMode, "Review against it", NeedsText: true),
+            new RemoteSendMode(DetectMode, "Detect goal", NeedsText: false, canDetect),
+            new RemoteSendMode(DetectRunMode, "Detect & run", NeedsText: false, canDetect),
+            new RemoteSendMode(DetectReviewMode, "Review changes", NeedsText: false, canDetect),
+        ];
+    }
+
+    private const string RunMode = "run";
+    private const string ReviewMode = "review";
+    private const string DetectMode = "detect";
+    private const string DetectRunMode = "detect-run";
+    private const string DetectReviewMode = "detect-review";
+
+    /// <summary>The discard question already answered on a paired phone, for the one command that phone
+    /// started, and read by <see cref="ConfirmDiscardAsync"/> in place of the computer's own dialog. It flows
+    /// with that command through every await it makes, and never reaches any other command. A box rather
+    /// than the flag itself, because the answer is spent where it is read: an <see cref="AsyncLocal{T}"/>
+    /// written inside an async method does not reach its caller, while a box both of them hold does.</summary>
+    private readonly AsyncLocal<StrongBox<bool>?> _discardAnsweredRemotely = new();
+
+    /// <summary>Starts a command with the discard question already answered on the phone.</summary>
+    private void StartAnswered(bool discard, Func<Task> command) =>
+        StartWithoutWaiting(RunAnsweredAsync(discard, command));
+
+    private async Task RunAnsweredAsync(bool discard, Func<Task> command)
+    {
+        _discardAnsweredRemotely.Value = new StrongBox<bool>(discard);
+        await command();
     }
 
     /// <inheritdoc />
@@ -144,19 +190,28 @@ public partial class GoalTileViewModel
     {
         switch (command)
         {
+            case RemoteSendText { Mode: { Length: > 0 } mode } send:
+                return HandleRemoteMode(mode, send);
+
             case RemoteSendText send:
                 if (send.Text.Trim().Length == 0) return "There is nothing to send.";
                 if (IsRunning && !ShowApproval && !ShowQuestions)
                     return "The goal is running. Pause it first, or wait for it to stop.";
 
-                if (send.Submit && StartingOverWouldAskHere())
-                    return "Starting a new goal discards this one, which is asked on the computer. Press + there first.";
+                if (send.Submit && !send.Discard && StartingOverWouldAskHere())
+                    return StartsOverRefusal;
 
-                if (RemoteText.WouldOverwrite(InputText, send.Text)) return RemoteText.DraftInTheWay;
+                if (RemoteText.WouldOverwrite(InputText, send.Text, send.Replaces)) return RemoteText.DraftInTheWay;
                 InputText = send.Text;
                 if (!send.Submit) return null;
 
-                StartWithoutWaiting(ShowApproval ? ApproveOrChangeCommand.ExecuteAsync(null) : SubmitCommand.ExecuteAsync(null));
+                StartAnswered(send.Discard,
+                    () => ShowApproval ? ApproveOrChangeCommand.ExecuteAsync(null) : SubmitCommand.ExecuteAsync(null));
+                return null;
+
+            case RemoteNewConversation:
+                if (IsRunning) return "The goal is running. Pause it first.";
+                StartAnswered(true, StartNewConversationAsync);
                 return null;
 
             case RemoteChoose { OptionId: "approve" } approve when approve.PendingId.StartsWith(PlanPrefix, StringComparison.Ordinal):
@@ -198,6 +253,42 @@ public partial class GoalTileViewModel
             default:
                 return "The goal tile cannot do that from a phone.";
         }
+    }
+
+    private const string StartsOverRefusal =
+        "Starting a new goal discards this one. Reload the page on the phone, or press + on the computer first.";
+
+    /// <summary>One of <see cref="RemoteModes"/>, run through the command the desktop's own control runs.</summary>
+    private string? HandleRemoteMode(string mode, RemoteSendText send)
+    {
+        if (!CanSetGoal)
+            return IsRunning ? "The goal is running. Pause it first, or wait for it to stop." : "That is not on offer right now.";
+        if (!send.Discard && StartingOverWouldAskHere()) return StartsOverRefusal;
+
+        var typed = send.Text.Trim().Length > 0;
+        var typedGoal = GoalScopeFilter.WordsOnly(send.Text).Length > 0;
+        if (mode is RunMode or ReviewMode && !typedGoal) return "Type the goal first.";
+        if (mode is DetectMode or DetectRunMode or DetectReviewMode && !typed && !CanDetectGoal)
+            return "There are no changes to read a goal from.";
+
+        Func<Task>? command = mode switch
+        {
+            RunMode => () => SetGoalAndRunCommand.ExecuteAsync(null),
+            ReviewMode => () => ReviewCommand.ExecuteAsync(null),
+            DetectMode => () => DetectAsync(andRun: false),
+            DetectRunMode => () => DetectAsync(andRun: true),
+            DetectReviewMode => () => DetectAsync(andRun: false, andReview: true),
+            _ => null,
+        };
+        if (command is null) return "That is not on offer right now.";
+
+        // What the phone typed goes where the desktop's controls read it: for a typed goal it is the goal,
+        // for a detect it narrows what is read, exactly as words typed beside those buttons do.
+        if (RemoteText.WouldOverwrite(InputText, send.Text, send.Replaces)) return RemoteText.DraftInTheWay;
+        InputText = send.Text;
+
+        StartAnswered(send.Discard, command);
+        return null;
     }
 
     /// <summary>The phone's answer to each question it answered, joined the way the composer shows a choice.</summary>

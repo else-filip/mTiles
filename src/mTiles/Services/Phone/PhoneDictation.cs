@@ -128,6 +128,22 @@ internal sealed class PhoneDictation : IDisposable
         }
     }
 
+    /// <summary>
+    /// A sentence meant for the phone's box whose push did not arrive is typed into the tile instead —
+    /// without Enter, so it waits there to be read — rather than being lost with nothing said anywhere.
+    /// </summary>
+    private async Task KeepIfUndeliveredAsync(Task<bool> pushed, LeafTileNodeViewModel? tile, string text)
+    {
+        if (await pushed.ConfigureAwait(false)) return;
+        Trace.TraceWarning("A dictated sentence could not be handed back to the phone; typing it into the tile instead.");
+        _dispatcher.Post(() =>
+        {
+            var delivery = PhoneDelivery(_settings.Settings);
+            delivery.AutoSubmitEnter = false;
+            DictationTextSink.Insert(tile, text, delivery, null);
+        });
+    }
+
     private bool IsRecordingFrom(ILinkPeer peer) => _streamOwner is { } owner && owner.Key == peer.Key;
 
     private Task<string?> BeginRecordingAsync(ILinkPeer peer, AudioHeader header) =>
@@ -173,12 +189,16 @@ internal sealed class PhoneDictation : IDisposable
                 _router.Phone.PrepareForStream(header.SampleRate);
                 _router.RouteNextToPhone();
 
+                var toDraft = header.ToDraft;
                 started = _dictation.Start(tile ?? (object)"phone", text =>
                 {
                     // To the phone that spoke, and only that one: a second paired device has no business
                     // showing somebody else's sentence.
-                    _ = PhoneBridgeManager.NotifyAsync(peer, PhoneProtocol.Push("text", new { message = text, tileId = tile?.TileId }));
-                    return DictationTextSink.Insert(tile, text, forPhone, focused);
+                    var route = SentenceRoute.For(toDraft, forPhone.AutoSubmitEnter);
+                    var pushed = PhoneBridgeManager.NotifyAsync(peer, PhoneProtocol.Push("text",
+                        new { message = text, tileId = tile?.TileId, draft = route.Draft, send = route.Send }));
+                    if (!route.TypedIntoTile) _ = KeepIfUndeliveredAsync(pushed, tile, text);
+                    return !route.TypedIntoTile || DictationTextSink.Insert(tile, text, forPhone, focused);
                 });
             }
             catch (Exception ex)
@@ -249,5 +269,16 @@ internal sealed class PhoneDictation : IDisposable
     {
         try { return FocusedElement?.Invoke(); }
         catch { return null; }
+    }
+
+    /// <summary>Where a phone's sentence goes. Asked for in the phone's own box, it is read and edited there
+    /// and sent from there — typed into nothing here, delivered by being handed back, and sent at once only
+    /// when the phone's auto-Enter in Settings says so. Otherwise it is typed into the tile, the older
+    /// page's route. The two flags are <c>null</c> rather than false so an older page sees no new keys.</summary>
+    internal readonly record struct SentenceRoute(bool? Draft, bool? Send, bool TypedIntoTile)
+    {
+        internal static SentenceRoute For(bool toDraft, bool autoEnter) => toDraft
+            ? new SentenceRoute(true, autoEnter ? true : null, TypedIntoTile: false)
+            : new SentenceRoute(null, null, TypedIntoTile: true);
     }
 }

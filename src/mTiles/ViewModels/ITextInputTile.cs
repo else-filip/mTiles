@@ -6,9 +6,12 @@ namespace mTiles.ViewModels;
 /// <remarks>
 /// A closed set, decided in this process at compile time. What reaches it has crossed a network from a
 /// device the user paired once and may have left in a coat pocket, and the destination is a shell — so
-/// everything not in this enum is nonsense that gets no reply. Six is also all that is needed: answering
-/// the prompt an agent is waiting on, moving through the choices it is offering, and dismissing or
-/// backing out of what it has put on the screen (Escape), which the arrows alone cannot do.
+/// everything not in this enum is nonsense that gets no reply. The first six answer the prompt an agent
+/// is waiting on, move through the choices it is offering, and dismiss or back out of what it has put on
+/// the screen (Escape). The rest are what a shell and a terminal agent are driven by from a phone with no
+/// keyboard of its own for them: completion (Tab), a TUI's mode switch (Shift+Tab — Claude Code's
+/// permission cycle), taking back a character, and the interrupt (Ctrl+C) a running command is stopped
+/// with.
 /// </remarks>
 public enum TileKey
 {
@@ -18,6 +21,10 @@ public enum TileKey
     Left,
     Right,
     Escape,
+    Tab,
+    ShiftTab,
+    Backspace,
+    CtrlC,
 }
 
 /// <summary>

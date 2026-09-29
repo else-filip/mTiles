@@ -88,6 +88,73 @@ public class GoalRemoteTests : IDisposable
         });
     }
 
+    [Fact]
+    public void A_new_goal_asked_for_on_the_phone_is_not_asked_again_on_the_computer()
+    {
+        Ui.Run(() =>
+        {
+            var state = new GoalTileState { OriginalGoal = "a goal", CurrentPhase = GoalPhase.Summary };
+            state.Messages.Add(new GoalMessage { Role = GoalMessageRole.User, Text = "a goal" });
+            using var tile = TileWith(state);
+            var asked = 0;
+            tile.ConfirmAction = _ => { asked++; return Task.FromResult(false); };
+
+            Assert.True(tile.DescribeForRemote().Composer?.StartsOver);
+            Assert.Null(Handle(tile, new RemoteNewConversation()));
+            Ui.Pump();
+
+            Assert.Equal(0, asked);
+            Assert.Equal(GoalPhase.Goal, tile.CurrentPhase);
+            Assert.DoesNotContain(tile.Messages, m => m.Text == "a goal");
+        });
+    }
+
+    [Fact]
+    public void The_other_sends_are_offered_only_where_a_goal_is_wanted()
+    {
+        Ui.Run(() =>
+        {
+            using var waiting = TileWith(new GoalTileState { OriginalGoal = "a goal", CurrentPhase = GoalPhase.Summary });
+            using var working = TileWith(new GoalTileState { OriginalGoal = "a goal", CurrentPhase = GoalPhase.Implement });
+
+            Assert.Contains(waiting.DescribeForRemote().Composer!.Modes!, m => m.Id == "run" && m.NeedsText == true);
+            Assert.Equal("New goal", waiting.DescribeForRemote().NewLabel);
+            Assert.Null(working.DescribeForRemote().Composer!.Modes);
+        });
+    }
+
+    [Theory]
+    [InlineData("run", "", "Type the goal first.")]
+    [InlineData("review", "  ", "Type the goal first.")]
+    [InlineData("detect", "", "There are no changes to read a goal from.")]
+    [InlineData("detect-run", "", "There are no changes to read a goal from.")]
+    [InlineData("sideways", "x", "That is not on offer right now.")]
+    public void A_send_that_cannot_do_what_it_names_says_so(string mode, string text, string refusal)
+    {
+        Ui.Run(() =>
+        {
+            using var tile = TileWith(new GoalTileState { CurrentPhase = GoalPhase.Goal });
+
+            Assert.Equal(refusal, Handle(tile, new RemoteSendText(text, true, mode)));
+            Assert.Equal("", tile.InputText);
+        });
+    }
+
+    [Fact]
+    public void The_computer_s_draft_is_shown_to_the_phone_and_may_be_replaced_once_seen()
+    {
+        Ui.Run(() =>
+        {
+            using var tile = TileWith(new GoalTileState { CurrentPhase = GoalPhase.Goal });
+            tile.InputText = "dictated here";
+
+            Assert.Equal("dictated here", tile.DescribeForRemote().Composer?.Draft);
+            Assert.Equal(RemoteText.DraftInTheWay, Handle(tile, new RemoteSendText("edited", Submit: false)));
+            Assert.Null(Handle(tile, new RemoteSendText("edited", Submit: false, Replaces: "dictated here")));
+            Assert.Equal("edited", tile.InputText);
+        });
+    }
+
     private static RemotePending PendingOf(GoalTileViewModel tile) =>
         Assert.IsType<RemotePending>(tile.DescribeForRemote().Chat?.Pending);
 

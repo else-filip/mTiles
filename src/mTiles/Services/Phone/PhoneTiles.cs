@@ -60,7 +60,8 @@ internal static class PhoneTiles
             body.Chat,
             body.Screen,
             body.Composer ?? RemoteComposer.None,
-            [.. PhoneTileActions.ForPhone(leaf.Actions).Select(a => new RemoteAction(a.Id, a.Label, a.Icon, a.IsEnabled))]);
+            [.. PhoneTileActions.ForPhone(leaf.Actions).Select(a => new RemoteAction(a.Id, a.Label, a.Icon, a.IsEnabled))],
+            body.NewLabel);
     }
 
     /// <summary>

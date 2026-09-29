@@ -55,6 +55,8 @@ public partial class GoalTileViewModel
     public const string ContinueActionId = "continue";
     public const string PauseActionId = "pause";
     public const string CommitActionId = "commit";
+    public const string ResumeActionId = "resume";
+    public const string ReReviewActionId = "re-review";
 
     /// <summary>What this tile offers its header and a paired phone.</summary>
     /// <remarks>
@@ -67,6 +69,10 @@ public partial class GoalTileViewModel
         new(ContinueActionId, "Continue", "play", IsEnabled: CanContinue),
         new(PauseActionId, "Pause", "pause", IsEnabled: IsRunning && !IsPaused),
         new(CommitActionId, "Commit work", "check", IsEnabled: CanCommit),
+        // The two the finished-run bar and a paused run offer in the conversation — which a phone draws
+        // too, but a paused run between phases has no block of its own there to carry a button.
+        new(ResumeActionId, "Resume", "play", IsEnabled: CanResume),
+        new(ReReviewActionId, "Review again", "refresh", IsEnabled: CanReReview),
     ];
 
     /// <inheritdoc />
@@ -85,6 +91,8 @@ public partial class GoalTileViewModel
             case ContinueActionId: await ContinueRun(); break;
             case PauseActionId: Pause(); break;
             case CommitActionId: await CommitWork(); break;
+            case ResumeActionId: await ResumeAsync(); break;
+            case ReReviewActionId: await ReReviewAsync(); break;
         }
 
         return TileActionResult.Ok;
@@ -6100,6 +6108,13 @@ public partial class GoalTileViewModel
         // the phase meant that a Clarify which failed — and so put the engine back to Goal — let the
         // next thing typed wipe the goal, the answers and the tool's replies without a word. Notes the
         // tile wrote about itself are not worth interrupting anybody over.
+        // Asked and answered on a paired phone, which is showing the transcript this would discard.
+        if (_discardAnsweredRemotely.Value is { Value: true } answeredOnThePhone)
+        {
+            answeredOnThePhone.Value = false;
+            return true;
+        }
+
         var worthConfirming = GoalTilePolicy.WorthConfirming(Messages);
         if (!worthConfirming && (!askWhenNothingToLose || ConfirmAction == null)) return true;
 

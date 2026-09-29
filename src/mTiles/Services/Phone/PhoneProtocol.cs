@@ -20,9 +20,17 @@ namespace mTiles.Services.Phone;
 /// </remarks>
 internal static class PhoneProtocol
 {
-    /// <summary>What this build speaks. Bumped only when a message changes meaning; a field added is
-    /// not a new version.</summary>
-    public const int Version = 1;
+    /// <summary>What this build speaks. Bumped when a page relies on something an older build would
+    /// refuse — 2 added four keys, the <c>new</c> request, the send's mode/replaces/discard and the audio
+    /// header's <c>toDraft</c>.</summary>
+    public const int Version = 2;
+
+    /// <summary>The oldest page this build still answers: everything since has only been added, so an
+    /// older page is not locked out of a newer build.</summary>
+    public const int OldestPageVersion = 1;
+
+    /// <summary>Whether a page speaking <paramref name="pageVersion"/> can be served by this build.</summary>
+    public static bool Accepts(int pageVersion) => pageVersion is >= OldestPageVersion and <= Version;
 
     /// <summary>The name the phone app's link is stored under, on both ends.</summary>
     public const string AppName = "mtiles-phone";
@@ -110,7 +118,9 @@ internal static class PhoneProtocol
                 "watch" => new WatchRequest(S("workspaceId"), S("tileId")),
                 "tile" when S("tileId") is { Length: > 0 } t => new TileRequest(t),
                 "send" when S("tileId") is { Length: > 0 } t && S("text") is { } text =>
-                    new TileCommandRequest(t, new RemoteSendText(text, B("submit"))),
+                    new TileCommandRequest(t, new RemoteSendText(text, B("submit"), S("mode"), S("replaces"),
+                        B("discard"))),
+                "new" when S("tileId") is { Length: > 0 } t => new TileCommandRequest(t, new RemoteNewConversation()),
                 "key" when S("tileId") is { Length: > 0 } t && PhoneKeys.TryParse(S("key"), out var key) =>
                     new TileCommandRequest(t, new RemoteKey(key)),
                 "choose" when S("tileId") is { Length: > 0 } t && S("pendingId") is { Length: > 0 } pending
@@ -152,7 +162,8 @@ internal static class PhoneProtocol
             var tileId = root.TryGetProperty("tileId", out var t) && t.ValueKind == JsonValueKind.String
                 ? t.GetString()
                 : null;
-            return new AudioHeader(string.IsNullOrEmpty(tileId) ? null : tileId, rate);
+            var toDraft = root.TryGetProperty("toDraft", out var d) && d.ValueKind == JsonValueKind.True;
+            return new AudioHeader(string.IsNullOrEmpty(tileId) ? null : tileId, rate, toDraft);
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
         {
@@ -203,4 +214,6 @@ internal sealed record TileCommandRequest(string TileId, RemoteTileCommand Comma
 
 internal sealed record ActionRequest(string TileId, string ActionId) : PhoneRequest;
 
-internal sealed record AudioHeader(string? TileId, int SampleRate);
+/// <param name="ToDraft">The transcript goes back to the phone's own text box, to be read and edited
+/// there, and into no tile. What a page that can show it asks for.</param>
+internal sealed record AudioHeader(string? TileId, int SampleRate, bool ToDraft = false);

@@ -95,6 +95,13 @@ public class PhoneKeysTests : IDisposable
     [InlineData("enter", "\r")]
     [InlineData("up", "\x1b[A")]
     [InlineData("down", "\x1b[B")]
+    [InlineData("left", "\x1b[D")]
+    [InlineData("right", "\x1b[C")]
+    [InlineData("escape", "\x1b")]
+    [InlineData("tab", "\t")]
+    [InlineData("shifttab", "\x1b[Z")]
+    [InlineData("backspace", "\x7f")]
+    [InlineData("ctrlc", "\x03")]
     public void A_key_reaches_the_shell_as_the_shell_reads_it(string name, string expected)
         => OnUiThread(async () =>
         {

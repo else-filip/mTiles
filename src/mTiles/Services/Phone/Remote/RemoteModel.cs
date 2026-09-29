@@ -79,16 +79,21 @@ public sealed record RemoteTileView(
     RemoteChat? Chat,
     RemoteScreen? Screen,
     RemoteComposer Composer,
-    IReadOnlyList<RemoteAction> Actions);
+    IReadOnlyList<RemoteAction> Actions,
+    string? NewLabel = null);
 
 /// <summary>What the content of a tile says about itself — the part of <see cref="RemoteTileView"/>
 /// the tile knows and its leaf does not.</summary>
+/// <param name="NewLabel">What starting the tile over is called — "New goal", "New conversation" — when a
+/// phone may ask for it, or null. The page asks before it sends it, because it is showing what would be
+/// left behind.</param>
 public sealed record RemoteTileBody(
     string View,
     RemoteStatus Status,
     RemoteChat? Chat = null,
     RemoteScreen? Screen = null,
-    RemoteComposer? Composer = null);
+    RemoteComposer? Composer = null,
+    string? NewLabel = null);
 
 /// <param name="Text">One line saying what the tile is doing, or null.</param>
 /// <param name="Detail">What it runs on — an agent's model, a goal's phase — or null.</param>
@@ -157,16 +162,39 @@ public sealed record RemoteAction(string Id, string Label, string Icon, bool Ena
 /// <param name="Enabled">Whether text can be sent at all right now.</param>
 /// <param name="Keys">Whether the arrow keys and Escape mean anything here — a terminal, not a chat.</param>
 /// <param name="CanInterrupt">Whether a Stop is offered.</param>
-public sealed record RemoteComposer(bool Enabled, string Placeholder, bool Keys = false, bool CanInterrupt = false)
+/// <param name="Draft">What is typed, unsent, in the tile's own input on the computer — a sentence
+/// dictated there, or something left half written — so the phone can show it, edit it and send it
+/// instead of being refused because of a draft it cannot see. Null where the tile has none.</param>
+/// <param name="Modes">The other ways a message can be sent here besides the plain one — the Goal tile's
+/// Set goal &amp; run, Review, Detect goal — or null.</param>
+/// <param name="StartsOver">Whether sending now replaces what the tile holds (a finished goal's
+/// transcript), so the page asks first and says it did.</param>
+public sealed record RemoteComposer(bool Enabled, string Placeholder, bool Keys = false, bool CanInterrupt = false,
+    string? Draft = null, IReadOnlyList<RemoteSendMode>? Modes = null, bool StartsOver = false)
 {
     public static readonly RemoteComposer None = new(false, "");
 }
+
+/// <summary>One way of sending the composer's text other than the plain one.</summary>
+/// <param name="NeedsText">True when it sends what is typed, false when it works without any (a goal read
+/// from the changes), null when either will do.</param>
+public sealed record RemoteSendMode(string Id, string Label, bool? NeedsText, bool Enabled = true);
 
 /// <summary>Something a phone asks a tile to do.</summary>
 public abstract record RemoteTileCommand;
 
 /// <param name="Submit">Whether it is sent — Enter after it — or only put in the tile's input.</param>
-public sealed record RemoteSendText(string Text, bool Submit) : RemoteTileCommand;
+/// <param name="Mode">One of the composer's <see cref="RemoteComposer.Modes"/>, or null for the plain send.</param>
+/// <param name="Replaces">The computer's draft as the phone was last shown it: a draft still exactly that
+/// is the phone's to replace, since the user has seen it; anything else is refused as in the way.</param>
+/// <param name="Discard">The phone asked, and the user agreed, that this may replace what the tile holds
+/// (<see cref="RemoteComposer.StartsOver"/>).</param>
+public sealed record RemoteSendText(string Text, bool Submit, string? Mode = null, string? Replaces = null,
+    bool Discard = false) : RemoteTileCommand;
+
+/// <summary>Starts the tile over — a new goal, a new conversation — which the phone has already asked
+/// about.</summary>
+public sealed record RemoteNewConversation : RemoteTileCommand;
 
 public sealed record RemoteKey(TileKey Key) : RemoteTileCommand;
 

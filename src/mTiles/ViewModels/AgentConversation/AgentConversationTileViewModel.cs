@@ -593,9 +593,9 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
 
     /// <summary>A message typed on a phone replaces the draft rather than joining it: it is a whole
     /// message of its own, and glued onto a half-typed sentence on the desktop it would be neither.</summary>
-    private string? SendRemoteText(string text, bool submit)
+    private string? SendRemoteText(string text, bool submit, string? seen = null)
     {
-        if (RemoteText.WouldOverwrite(Draft, text)) return RemoteText.DraftInTheWay;
+        if (RemoteText.WouldOverwrite(Draft, text, seen)) return RemoteText.DraftInTheWay;
         Draft = text;
         if (submit) _ = SendAsync();
         return null;
@@ -1373,13 +1373,17 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
     /// a new conversation is a cleared screen: one misclick empties the transcript somebody was reading, and
     /// the way back is a search through the list. No dialog to ask in is a no.</para></remarks>
     [RelayCommand]
-    private Task NewConversationAsync() => UnderSwitchGateAsync(async () =>
+    private Task NewConversationAsync() => StartNewConversationCoreAsync(askFirst: true);
+
+    /// <summary>The new conversation itself, with the question left to the caller that has asked it
+    /// already — a phone, over the transcript it is showing.</summary>
+    private Task StartNewConversationCoreAsync(bool askFirst) => UnderSwitchGateAsync(async () =>
     {
         var question = IsBusy
             ? "Start a new conversation? The agent is working, and this stops what it is doing. " +
               "This one stays in the list of conversations."
             : "Start a new conversation? This one stays in the list of conversations.";
-        if (ConfirmAction is null || !await ConfirmAction(question)) return;
+        if (askFirst && (ConfirmAction is null || !await ConfirmAction(question))) return;
 
         // Logged rather than thrown: bound straight to a button, a failure here would otherwise reach the
         // crash handler rather than the log, where the pick that used to start a conversation sent it.
@@ -1917,7 +1921,9 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
             Composer: new RemoteComposer(
                 canType,
                 canType ? "Message the agent" : IsStarting ? "The agent is starting…" : "The agent is not running",
-                CanInterrupt: IsBusy && CanInterrupt));
+                CanInterrupt: IsBusy && CanInterrupt,
+                Draft: Draft.Length > 0 ? Draft : null),
+            NewLabel: "New conversation");
     }
 
     /// <inheritdoc />
@@ -1936,7 +1942,13 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
         {
             case RemoteSendText send:
                 if (!CanSend()) return IsStarting ? "The agent is still starting." : "The agent is not running.";
-                return SendRemoteText(send.Text, send.Submit);
+                return SendRemoteText(send.Text, send.Submit, send.Replaces);
+
+            case RemoteNewConversation:
+                // Asked on the phone, over the transcript it is showing; the computer's own question would
+                // wait on a screen nobody at the phone can see.
+                await StartNewConversationCoreAsync(askFirst: false);
+                return null;
 
             case RemoteKey key:
                 return TryPressKey(key.Key) ? null : "That key does nothing here.";

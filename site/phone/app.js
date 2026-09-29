@@ -34,8 +34,6 @@ const state = {
   level: "workspaces",    // computers | workspaces | layout | tile
   workspaceId: null,
   tileId: null,
-  keysOpen: false,
-  actionsOpen: false,
   answers: {},            // pendingId -> { questionId -> [labels] }
   answerChips: 0,         // moves when a chip is toggled — typing does not redraw, or the field loses focus
   sending: false,
@@ -188,6 +186,10 @@ function abandonPairing(m, reason) {
 }
 
 function onPush(m, message) {
+  if (message.type === "text" && message.draft && !isShowingTile(m, message.tileId)) {
+    keepDictatedFor(m, message);
+    return;
+  }
   if (!isCurrent(m)) {
     // A computer in the background is listened to only for what the list of computers shows.
     const before = elsewhereNeedsYou();
@@ -211,6 +213,10 @@ function onPush(m, message) {
       if (message.tileId === state.tileId) { say("That tile was closed on the computer."); go("layout"); return; }
       break;
     case "text":
+      // Asked for in this box: it goes there, to be read before it is sent.
+      if (message.draft) { takeDictated(message.message, message.send === true); return; }
+      sayFrom(m, message);
+      break;
     case "error":
       sayFrom(m, message);
       break;
@@ -218,6 +224,22 @@ function onPush(m, message) {
       return;
   }
   draw();
+}
+
+function isShowingTile(m, tileId) {
+  return isCurrent(m) && state.level === "tile" && tileId === state.tileId;
+}
+
+/** A sentence asked for in a box the page has since left: the computer counts it delivered, so it waits
+ *  in that tile's draft for the way back rather than living only in a toast. Never sent from there. */
+function keepDictatedFor(m, message) {
+  const heard = message.message?.trim();
+  if (!heard || !message.tileId) return;
+  const key = `${m.id}/${message.tileId}`;
+  const kept = drafts.get(key) ?? { text: "", adopted: null };
+  kept.text = kept.text.trim() ? `${kept.text.trimEnd()} ${heard}` : heard;
+  drafts.set(key, kept);
+  sayFrom(m, message);
 }
 
 /** What a computer says back — a dictated sentence heard, or an error — is said whichever computer is on
@@ -269,11 +291,27 @@ async function ask(message) {
 function go(level, { machineId, workspaceId, tileId, from } = {}, push = true) {
   const before = state.level;
   // The list of computers belongs to none of them, so reaching it — Back included — keeps the current one.
+  // What was left is named on the computer it belonged to, before a switch moves the page to another.
+  const leftTile = before === "tile" ? state.tileId : null;
+  const leftMachine = currentId;
   if (level !== "computers" && machineId && machineId !== currentId && machines.has(machineId)) switchTo(machineId);
   state.level = level;
   if (workspaceId !== undefined) state.workspaceId = workspaceId;
   if (tileId !== undefined) state.tileId = tileId;
-  if (level !== "tile") { state.tile = null; state.keysOpen = false; state.actionsOpen = false; lastTileKey = lastDockKey = null; }
+  const enteredTile = level === "tile" ? state.tileId : null;
+  if (leftTile !== enteredTile) {
+    // A draft belongs to the tile it was typed for, and waits there for the way back; a recording aimed
+    // at a tile left behind is thrown away.
+    if (dictation.active) dictation.finish(true);
+    // Which of the computer's drafts this box took over travels with it, or a send on the way back would
+    // not be allowed to replace it.
+    if (leftTile) drafts.set(`${leftMachine}/${leftTile}`, { text: draft, adopted: adoptedDraft });
+    const kept = enteredTile ? drafts.get(`${currentId}/${enteredTile}`) : undefined;
+    draft = kept?.text ?? "";
+    adoptedDraft = kept?.adopted ?? null;
+    remoteDraft = null;
+  }
+  if (level !== "tile") { state.tile = null; lastTileKey = lastDockKey = null; }
   if (depth(level) <= depth("workspaces")) state.layout = null;
 
   if (push) history.pushState({ level, machineId: currentId, workspaceId: state.workspaceId, tileId: state.tileId }, "");
@@ -282,6 +320,7 @@ function go(level, { machineId, workspaceId, tileId, from } = {}, push = true) {
   draw();
   zoom(origin, depth(level) > depth(before));
   watch();
+  holdScreenOn();
 
   // An answer is kept only if the page is still looking at what it asked about, on the same computer —
   // the same test a push passes.
@@ -777,6 +816,10 @@ function chatItem(item) {
   } else {
     li.append(h("pre.plain", item.text));
   }
+  // What was said can be said again, changed: the desktop's Up arrow in the composer, as a tap.
+  if (item.role === "user" && item.text?.trim()) {
+    li.append(h("button.msg-edit", { "aria-label": "Edit and send again", onclick: () => setDraft(item.text) }, icon("edit")));
+  }
   if (item.streaming) li.classList.add("streaming");
   return li;
 }
@@ -853,7 +896,6 @@ function actionButton(tile, a) {
   return h("button", {
     disabled: !a.enabled,
     onclick: async () => {
-      state.actionsOpen = false;
       if (await ask({ type: "action", tileId: tile.tileId, id: a.id })) say(`${a.label}: started.`);
       draw();
     },
@@ -861,19 +903,76 @@ function actionButton(tile, a) {
 }
 
 // dock
+//
+// Three rows, each shown only when it has something in it: the keys a terminal is driven by (always
+// there — hunting for them behind a button is what a phone held at arm's length on a treadmill cannot
+// do), the ways to send besides the plain one together with Stop and the history of what was said, and
+// the text box itself. Dictation lands in that box rather than straight in the tile, so what was heard is
+// read and corrected before it goes — unless the phone's auto-Enter is on in Settings → Speech.
 
 let draft = "";
+const drafts = new Map();   // "computer/tile" -> { text typed there and not sent, the computer draft it took over }
 let lastDockKey = null;
+/** The computer's own unsent draft in this tile, as last pushed. A send replaces only the one taken
+ *  into this box (adoptedDraft) — the one the user has actually read in full. */
+let remoteDraft = null;
+/** The computer's draft the phone's box last took over, so the same one is not taken again after it was
+ *  cleared here on purpose. */
+let adoptedDraft = null;
+let micHeldSince = 0;
+
+const prefs = {
+  get keysHidden() { return localStorage.getItem("mtiles.keysHidden") === "1"; },
+  set keysHidden(v) { localStorage.setItem("mtiles.keysHidden", v ? "1" : "0"); },
+};
+
+const KEYS = [
+  ["escape", "Esc"], ["tab", "Tab"], ["shifttab", "⇧Tab"], ["up", null], ["down", null], ["left", null],
+  ["right", null], ["ctrlc", "^C"], ["backspace", "⌫"], ["enter", null],
+];
+
+/** Puts text in the box to be edited — a previous prompt, the computer's draft — and the keyboard on it. */
+function setDraft(text, { focus = true } = {}) {
+  draft = text;
+  lastDockKey = null;
+  draw();
+  const input = dock.querySelector(".draft");
+  if (input && focus) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+}
+
+/** A sentence heard by the computer, for this box: added after what is there, and sent at once when the
+ *  phone's auto-Enter is on in the computer's Settings. */
+function takeDictated(text, sendNow) {
+  const heard = text.trim();
+  if (!heard) return;
+  draft = draft.trim() ? `${draft.trimEnd()} ${heard}` : heard;
+  lastDockKey = null;
+  draw();
+  if (sendNow && state.tile) send(state.tile, true);
+}
 
 function drawDock(tile) {
   const composer = tile.composer;
   const dictating = state.session?.dictation?.available;
-  const recordingHere = dictation.recording;
   const hasActions = tile.actions.length > 0 && tile.view !== "none";
+  const hasHistory = historyFor(tile).length > 0;
+  const modes = composer.modes ?? [];
+
+  // The computer's draft is taken into an empty box the first time it is seen; into a box holding
+  // something it is offered, never pushed over what the thumb is writing.
+  remoteDraft = composer.draft ?? null;
+  const focused = document.activeElement?.classList?.contains("draft");
+  if (remoteDraft && remoteDraft !== adoptedDraft && !draft.trim() && !focused) {
+    draft = remoteDraft;
+    adoptedDraft = remoteDraft;
+  }
+  const empty = draft.trim().length === 0;
+  const offerRemote = remoteDraft && remoteDraft !== draft && remoteDraft !== adoptedDraft;
 
   // Rebuilt only when what it offers changed: rebuilding the text box under somebody's thumb ends their
   // keyboard's composition and throws the caret to the end.
-  const dockKey = JSON.stringify([tile.tileId, composer, tile.actions, dictating, state.keysOpen, state.actionsOpen, draft.length === 0]);
+  const dockKey = JSON.stringify([tile.tileId, composer, tile.actions, tile.newLabel, dictating, prefs.keysHidden,
+    empty, hasHistory, offerRemote]);
   if (dockKey === lastDockKey && dock.firstChild) return;
   lastDockKey = dockKey;
 
@@ -882,48 +981,157 @@ function drawDock(tile) {
     placeholder: composer.placeholder || "Type a message",
     disabled: !composer.enabled,
     value: draft,
+    enterKeyHint: composer.keys ? "enter" : "send",
     oninput: (e) => {
-      const wasEmpty = draft.length === 0;
+      const wasEmpty = draft.trim().length === 0;
       draft = e.target.value;
       grow(e.target);
-      // Send and Stop share a slot, and which one shows depends on whether anything is typed.
-      if (wasEmpty !== (draft.length === 0) && composer.canInterrupt) drawDock(tile);
+      // What the chips offer depends on whether anything is typed.
+      if (wasEmpty !== (draft.trim().length === 0)) drawDock(tile);
     },
     onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey && !composer.keys) { e.preventDefault(); send(tile, true); } },
   });
 
   const mic = dictating ? h("button.mic", {
-    class: recordingHere ? "recording" : "",
-    "aria-label": "Hold to talk",
-    onpointerdown: (e) => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); dictation.begin(tile.tileId); e.currentTarget.classList.add("recording"); },
-    onpointerup: (e) => { dictation.finish(false); e.currentTarget.classList.remove("recording"); },
-    onpointercancel: (e) => { dictation.finish(true); e.currentTarget.classList.remove("recording"); },
+    class: dictation.recording ? "recording" : "",
+    "aria-label": dictation.recording ? "Stop recording" : "Talk — hold, or tap to start and tap to stop",
+    onpointerdown: (e) => {
+      e.preventDefault();
+      if (dictation.active) { stopRecording(false); return; }
+      micHeldSince = Date.now();
+      e.currentTarget.setPointerCapture(e.pointerId);
+      // Marked at once: the recording itself only begins once the microphone is open.
+      e.currentTarget.classList.add("recording");
+      e.currentTarget.setAttribute("aria-label", "Stop recording");
+      startRecording(tile);
+    },
+    // Held: push to talk, and letting go ends it. Tapped: it keeps listening until the next tap — the
+    // hand that is holding a rail on a treadmill cannot also hold a button.
+    onpointerup: () => { if (micHeldSince && Date.now() - micHeldSince > 400) stopRecording(false); micHeldSince = 0; },
+    onpointercancel: () => { if (micHeldSince) stopRecording(true); micHeldSince = 0; },
     oncontextmenu: (e) => e.preventDefault(),
   }, icon("mic")) : null;
 
-  // Stop stands where Send was a moment ago, and what the tool was answering is lost — so a second tap
-  // meant for Send must not be enough, the rule the desktop's own Pause keeps by asking first.
-  const confirmStop = () => window.confirm("Stop? What the tool is answering now is lost.");
-  const primary = composer.canInterrupt && !draft.trim()
-    ? h("button.stop", { "aria-label": "Stop", onclick: () => confirmStop() && ask({ type: "interrupt", tileId: tile.tileId }) }, icon("stop"))
-    : h("button.send", { "aria-label": "Send", disabled: !composer.enabled, onclick: () => send(tile, true) }, icon("send"));
+  // A terminal with nothing typed is sent an Enter: the prompt it is sitting on wants answering more
+  // often than it wants text.
+  const primary = h("button.send", {
+    "aria-label": composer.keys && empty ? "Enter" : "Send",
+    disabled: !composer.enabled || (empty && !composer.keys),
+    onclick: () => (composer.keys && empty ? pressKey(tile, "enter") : send(tile, true)),
+  }, icon(composer.keys && empty ? "enter" : "send"));
 
-  const tools = [
-    composer.keys ? h("button.tool", { class: state.keysOpen ? "on" : "", "aria-label": "Keys", onclick: () => { state.keysOpen = !state.keysOpen; draw(); } }, icon("keys")) : null,
-    hasActions ? h("button.tool", { class: state.actionsOpen ? "on" : "", "aria-label": "Actions", onclick: () => { state.actionsOpen = !state.actionsOpen; draw(); } }, icon("more")) : null,
-  ];
+  const more = hasActions || tile.newLabel || composer.keys
+    ? h("button.tool", { "aria-label": "More", onclick: () => moreSheet(tile) }, icon("more"))
+    : null;
 
-  const focused = document.activeElement?.classList?.contains("draft");
+  // Stop is not in Send's place any more, so it needs no second tap: the desktop's Escape asks nothing.
+  const stop = composer.canInterrupt
+    ? h("button.chip.stop-chip", { onclick: () => ask({ type: "interrupt", tileId: tile.tileId }) }, icon("stop"), composer.keys ? "Stop" : "Stop · Esc")
+    : null;
+  const history = hasHistory
+    ? h("button.chip", { onclick: () => historySheet(tile), "aria-label": "Previous messages" }, icon("history"), "History")
+    : null;
+  // An empty box can only read a goal out of the changes; a typed one can set it, or narrow what is read.
+  const modeChips = modes.filter((m) => !empty || m.needsText !== true)
+    .map((m) => h("button.chip", { disabled: !m.enabled, onclick: () => sendMode(tile, m) }, m.label));
+
   fill(dock,
-    state.actionsOpen && hasActions ? h("div.dock-actions", tile.actions.map((a) => actionButton(tile, a))) : null,
-    state.keysOpen && composer.keys ? h("div.keys", [
-      ["up", "up"], ["down", "down"], ["left", "left"], ["right", "right"], ["escape", null], ["enter", "enter"],
-    ].map(([key, glyph]) => h("button.key", {
-      "aria-label": key, onclick: () => ask({ type: "key", tileId: tile.tileId, key }),
-    }, glyph ? icon(glyph) : "Esc"))) : null,
-    h("div.dock-row", tools, input, mic, primary));
+    offerRemote ? h("div.remote-draft",
+      h("span.remote-text", h("span.muted", "On the computer: "), remoteDraft),
+      h("button.chip", { onclick: () => { adoptedDraft = remoteDraft; setDraft(remoteDraft); } }, "Edit here")) : null,
+    composer.keys && !prefs.keysHidden ? h("div.keys", KEYS.map(([key, label]) => h("button.key", {
+      "aria-label": key, class: key === "ctrlc" || key === "escape" ? "warn" : "",
+      onclick: () => pressKey(tile, key),
+    }, label ?? icon(key)))) : null,
+    stop || history || modeChips.length ? h("div.dock-chips", stop, history, modeChips) : null,
+    h("div.dock-row", more, input, mic, primary));
   grow(input);
   if (focused) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+}
+
+function pressKey(tile, key) {
+  navigator.vibrate?.(8);
+  return ask({ type: "key", tileId: tile.tileId, key });
+}
+
+function startRecording(tile) {
+  navigator.vibrate?.(20);
+  // The button is updated in place, never rebuilt: a finger still holds it, and a new element would lose
+  // the pointer capture, so letting go elsewhere would leave the microphone open.
+  dictation.begin(tile.tileId, { toDraft: true }).finally(() => markMic(dictation.recording));
+}
+
+function markMic(recording) {
+  const mic = dock.querySelector(".mic");
+  if (!mic) return;
+  mic.classList.toggle("recording", recording);
+  mic.setAttribute("aria-label", recording ? "Stop recording" : "Talk — hold, or tap to start and tap to stop");
+}
+
+function stopRecording(cancel) {
+  navigator.vibrate?.(cancel ? [10, 40, 10] : 12);
+  dictation.finish(cancel);
+  markMic(false);
+}
+
+/** What the History sheet lists: the user's own messages in this conversation, newest first.
+ *  Nothing typed on the phone is kept by the phone: a terminal's box is where a password answers sudo. */
+function historyFor(tile) {
+  const own = (tile.chat?.items ?? []).filter((i) => i.role === "user" && i.text?.trim()).map((i) => i.text).reverse();
+  return [...new Set(own)].slice(0, 40);
+}
+
+function historySheet(tile) {
+  const el = sheet(
+    h("p.sheet-title", "Previous messages — tap one to edit it and send it again"),
+    h("div.history", historyFor(tile).map((text) => h("button.history-item", {
+      onclick: () => { el.remove(); setDraft(text); },
+    }, text))));
+}
+
+function moreSheet(tile) {
+  const composer = tile.composer;
+  const el = sheet(
+    h("p.sheet-title", tile.name),
+    tile.actions.map((a) => h("button", {
+      disabled: !a.enabled,
+      onclick: async () => { el.remove(); if (await ask({ type: "action", tileId: tile.tileId, id: a.id })) say(`${a.label}: started.`); },
+    }, a.label)),
+    tile.newLabel ? h("button", { onclick: () => { el.remove(); startOver(tile); } }, tile.newLabel) : null,
+    composer.keys ? h("button.quiet", {
+      onclick: () => { el.remove(); prefs.keysHidden = !prefs.keysHidden; lastDockKey = null; draw(); },
+    }, prefs.keysHidden ? "Show the keys" : "Hide the keys") : null);
+}
+
+async function startOver(tile) {
+  const what = tile.newLabel;
+  const question = tile.kind === "goal"
+    ? `${what}? The current goal and its transcript are discarded.`
+    : `${what}? This one stays in the list of conversations on the computer.`
+      + (tile.composer.canInterrupt ? " The agent is working, and this stops what it is doing." : "");
+  if (!confirm(question)) return;
+  if (await ask({ type: "new", tileId: tile.tileId })) { draft = ""; adoptedDraft = remoteDraft; say(`${what}: started.`); draw(); }
+}
+
+/** Whether sending now may replace what the tile holds, having asked. */
+function consentToStartOver(tile) {
+  if (!tile.composer.startsOver) return { ok: true, discard: false };
+  return { ok: confirm("This starts a new goal and discards the current one. Go on?"), discard: true };
+}
+
+async function sendMode(tile, mode) {
+  const text = draft.trim();
+  if (mode.needsText && !text) { say("Type the goal first.", "error"); return; }
+  const { ok, discard } = consentToStartOver(tile);
+  if (!ok || state.sending) return;
+  state.sending = true;
+  const answer = await ask({ type: "send", tileId: tile.tileId, text, submit: true, mode: mode.id, replaces: adoptedDraft, discard });
+  state.sending = false;
+  // A detect keeps the words on the computer until a goal is read out of them, so the next push carries
+  // them back: they were sent, and are not a draft to take into the box again.
+  if (answer) { draft = ""; adoptedDraft = text || remoteDraft; scrollToEnd(true); }
+  lastDockKey = null;
+  draw();
 }
 
 function grow(el) {
@@ -934,12 +1142,32 @@ function grow(el) {
 async function send(tile, submit) {
   const text = draft.trim();
   if (!text || state.sending) return;
+  const { ok, discard } = submit ? consentToStartOver(tile) : { ok: true, discard: false };
+  if (!ok) return;
   state.sending = true;
-  const answer = await ask({ type: "send", tileId: tile.tileId, text, submit });
+  const answer = await ask({ type: "send", tileId: tile.tileId, text, submit, replaces: adoptedDraft, discard });
   state.sending = false;
-  if (answer) { draft = ""; scrollToEnd(true); }
+  if (answer) { draft = ""; adoptedDraft = remoteDraft; scrollToEnd(true); }
+  lastDockKey = null;
   draw();
 }
+
+// The screen stays on while a tile is open: a phone strapped to a treadmill that locks itself between two
+// sentences is a phone that has to be unlocked with a sweaty thumb.
+let wakeLock = null;
+async function holdScreenOn() {
+  const want = state.level === "tile" && !document.hidden;
+  if (want && !wakeLock && navigator.wakeLock) {
+    try {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => { wakeLock = null; });
+    } catch { /* refused — battery saver, or an older browser */ }
+  } else if (!want && wakeLock) {
+    wakeLock.release().catch(() => {});
+    wakeLock = null;
+  }
+}
+document.addEventListener("visibilitychange", holdScreenOn);
 
 // ── toast ─────────────────────────────────────────────────────────────────────────────────────
 

@@ -444,6 +444,12 @@ public partial class TerminalTileViewModel : ObservableObject, IBusyTile, ICusto
         if (LiveTerminal is not { } terminal)
             return false;
 
+        // Ctrl+C is a copy while anything is selected on the computer, which the phone cannot see: from a
+        // phone it always means the interrupt, so the selection goes first. It still travels as a key
+        // event — a raw 0x03 through SendText becomes a CTRL_C_EVENT for every process on the ConPTY,
+        // the shell included, while the control's own encoder interrupts only what runs in it.
+        if (key == TileKey.CtrlC)
+            terminal.ClearSelection();
         TileKeyPress.At(terminal, key);
         return true;
     }

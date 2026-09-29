@@ -732,8 +732,11 @@ The microphone is next to *you*. Over Remote Desktop, mTiles is not; on the sofa
 The QR button beside Settings pairs a phone, and from then on the phone is a remote for the whole window:
 every workspace, each one's layout drawn to scale, and any tile zoomed into — an Agent or a Goal tile's
 conversation as it happens, with its approvals, questions and plan to answer; a terminal's screen as
-text, with the arrows, Escape and Enter; typing; hold-to-talk dictation into that tile; and whatever
-actions the tile offers a phone. Recognition still runs here, through the pipeline above, unchanged.
+text, with the keys a shell is driven by (Esc, Tab, Shift+Tab, the arrows, Ctrl+C, Backspace, Enter);
+typing; dictation — held, or tapped on and off — whose sentence comes back into the phone's own text box
+to be corrected before it is sent; the previous messages to send again; the Goal tile's Detect, Review,
+Set goal & run and New goal; and whatever actions the tile offers a phone. Recognition still runs here,
+through the pipeline above, unchanged.
 
 **Nothing listens to the network.** Both ends dial *out* to Tailscale's public DERP relays through
 [tailcat-link](https://github.com/b-y-t-e/tailcat-link) (`Tailcat.Link` on NuGet, and its browser client
@@ -794,14 +797,24 @@ private key, and `sessions.json` — are deleted on the first start.
 ### The protocol
 
 `PhoneProtocol` is the whole of it. **Requests** are JSON with a `type` (`hello`, `workspaces`, `layout`,
-`open`, `watch`, `tile`, `send`, `key`, `choose`, `answer`, `interrupt`, `action`), answered with
+`open`, `watch`, `tile`, `send`, `new`, `key`, `choose`, `answer`, `interrupt`, `action`, `unpair`), answered with
 `{"ok":true,…}` or `{"ok":false,"error":"…"}`; anything that is not exactly a request — malformed JSON, a
-number where a string belongs, a key name outside the six — gets the error and never an exception.
+number where a string belongs, a key name outside the ten — gets the error and never an exception.
 `hello` exchanges `PhoneProtocol.Version`, because the page is hosted separately and either may be the
 newer: a mismatch is a screen saying which one to update, not a guess.
 
+`send` carries, beside `text` and `submit`, the Goal tile's `mode` (one of `RemoteComposer.Modes`),
+`replaces` (the computer's draft the phone has shown in full and may overwrite — any other draft there
+refuses the send as in the way) and `discard` (the phone already asked whether to throw away the goal on
+screen). `new` starts a new goal or conversation (`RemoteNewConversation`) and never opens the computer's
+own question: the page asks it first, since it is the one showing what would be lost. A page at protocol 2
+may use both; `PhoneProtocol.OldestPageVersion` is how far back a page is still accepted.
+
 **Pushes** are notifications the page did not ask for: `session` (dictation state), `workspaces`,
-`layout`, `tile`, `tileGone`, `text` (what was heard, to the phone that spoke only) and `error`. What each
+`layout`, `tile`, `tileGone`, `text` (what was heard, to the phone that spoke only — with `tileId`, and
+`draft: true` when the audio header asked for it back with `toDraft`, meaning the page puts it in its own
+text box rather than the tile having been typed into; `send: true` then says the phone's auto-Enter is on
+and the page sends it at once) and `error`. What each
 phone is sent follows what it says it is looking at (`watch`), and is **sampled, not evented**: four
 times a second while a phone is connected, each tile's `IRemoteViewTile.RemoteVersion` is compared and
 only a tile that moved is described again, and anything identical to what that phone was last sent is not
@@ -827,7 +840,7 @@ tile is minutes of work, and a request waiting on it would time out on the phone
 
 Not a request per frame — that is a round trip and a ledger entry each — and not a request then frames,
 because ordering between a request and a channel is not promised. One channel (`audio`) per utterance:
-its first frame is a JSON header naming the tile and the sample rate, 16-bit PCM follows, a one-byte
+its first frame is a JSON header naming the tile, the sample rate and — from a protocol-2 page — `toDraft` (the sentence comes back as a `text` push for the phone's own box instead of being typed into the tile), 16-bit PCM follows, a one-byte
 frame of zero throws the recording away, and the channel **closing on purpose** ends the sentence. A
 channel that ends with the session instead is a cancel: half a command typed into a terminal is worse
 than none. Frames spoken while the channel opens are held by the page and sent after the header.
@@ -879,7 +892,7 @@ with a wedged page holds the connection open.
 
 ### The thing being protected is the keyboard
 
-What a paired device can cause: type into a tile, press six keys, answer what an agent asks, and press
+What a paired device can cause: type into a tile, press ten keys (Ctrl+C among them), answer what an agent asks, and press
 the actions a tile offers a phone. **Destructive actions are never offered** (`PhoneTileActions`, the one
 filter for what is shown and what may be pressed) — Restart shell, deleting a conversation — nor anything
 that opens a dialog on a desktop nobody is at. Answering an approval *is* a grant, the same one the

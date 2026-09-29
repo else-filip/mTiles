@@ -32,10 +32,15 @@ export class Dictation {
 
   get recording() { return this.#recording; }
 
+  /** Recording, or asked to and still opening the microphone — what a second tap has to stop rather
+   *  than start again. */
+  get active() { return this.#held || this.#recording; }
+
   /** Starts a recording aimed at `tileId`. Called from the press itself, so the audio context is
-   *  created inside a user gesture — which is what iOS demands of it. */
-  async begin(tileId) {
-    if (this.#recording) return;
+   *  created inside a user gesture — which is what iOS demands of it. With `toDraft` the computer hands
+   *  the sentence back for this page's own text box and types it into nothing. */
+  async begin(tileId, { toDraft = false } = {}) {
+    if (this.active) return;
     this.#held = true;
     this.#prime();
 
@@ -58,7 +63,7 @@ export class Dictation {
     this.#recording = true;
     this.#pending = [];
     this.#channel = null;
-    const header = new TextEncoder().encode(JSON.stringify({ tileId, sampleRate: this.#ctx.sampleRate }));
+    const header = new TextEncoder().encode(JSON.stringify({ tileId, sampleRate: this.#ctx.sampleRate, toDraft }));
 
     // Frames spoken while the channel opens are held and sent after the header, in order — otherwise the
     // first syllable is lost, which in push-to-talk is the first word.

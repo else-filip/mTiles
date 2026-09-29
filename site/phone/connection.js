@@ -8,7 +8,7 @@
 import { invitationCodeFrom } from "./computers.js";
 import { TailcatLink, parseInvitationCode, PairingRefusedError } from "./vendor/tailcat-link/index.js";
 
-export const PROTOCOL = 1;
+export const PROTOCOL = 2;
 const MACHINES = "mtiles.machines";
 const LAST = "mtiles.lastMachine";
 

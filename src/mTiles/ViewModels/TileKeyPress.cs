@@ -21,33 +21,45 @@ namespace mTiles.ViewModels;
 public static class TileKeyPress
 {
     /// <summary>Presses the key at a control.</summary>
-    public static void At(Interactive target, TileKey key) =>
-        target.RaiseEvent(new KeyEventArgs
+    public static void At(Interactive target, TileKey key)
+    {
+        var (avaloniaKey, modifiers) = ToAvalonia(key);
+        target.RaiseEvent(new PressedFromOutsideKeyEventArgs
         {
             RoutedEvent = InputElement.KeyDownEvent,
             Source = target,
-            Key = ToAvalonia(key),
-            KeyModifiers = KeyModifiers.None,
+            Key = avaloniaKey,
+            KeyModifiers = modifiers,
         });
+    }
 
     /// <summary>What each key is, to a control that reads the keyboard.</summary>
     /// <remarks>
     /// Every member spelled out and the default throwing, rather than an <c>Enter</c> to fall back on.
     /// The set is closed at compile time — that is the doctrine <see cref="TileKey"/> is written to — but
     /// a catch-all here would quietly opt out of it: a new key added to the enum and missed in this
-    /// one place would be sent as <em>Enter</em>, which of the six is the one that cannot be taken
+    /// one place would be sent as <em>Enter</em>, which of them all is the one that cannot be taken
     /// back — it answers the prompt an agent is sitting on with whatever that prompt's default is.
     /// <para>Safe to reach, because every press is wrapped: the caller reports a failure as "the key
     /// could not be delivered", which is the truth.</para>
     /// </remarks>
-    private static Key ToAvalonia(TileKey key) => key switch
+    private static (Key Key, KeyModifiers Modifiers) ToAvalonia(TileKey key) => key switch
     {
-        TileKey.Enter => Key.Enter,
-        TileKey.Up => Key.Up,
-        TileKey.Down => Key.Down,
-        TileKey.Left => Key.Left,
-        TileKey.Right => Key.Right,
-        TileKey.Escape => Key.Escape,
+        TileKey.Enter => (Key.Enter, KeyModifiers.None),
+        TileKey.Up => (Key.Up, KeyModifiers.None),
+        TileKey.Down => (Key.Down, KeyModifiers.None),
+        TileKey.Left => (Key.Left, KeyModifiers.None),
+        TileKey.Right => (Key.Right, KeyModifiers.None),
+        TileKey.Escape => (Key.Escape, KeyModifiers.None),
+        TileKey.Tab => (Key.Tab, KeyModifiers.None),
+        TileKey.ShiftTab => (Key.Tab, KeyModifiers.Shift),
+        TileKey.Backspace => (Key.Back, KeyModifiers.None),
+        TileKey.CtrlC => (Key.C, KeyModifiers.Control),
         _ => throw new ArgumentOutOfRangeException(nameof(key), key, "No key is mapped for this."),
     };
 }
+
+/// <summary>A key pressed by <see cref="TileKeyPress"/> rather than on this computer's keyboard.</summary>
+/// <remarks>Window-level handlers that answer a gesture for whichever tile holds a selection — the
+/// clipboard's Ctrl+C — leave it alone: it is aimed at one tile, and only that tile may answer it.</remarks>
+public sealed class PressedFromOutsideKeyEventArgs : KeyEventArgs;

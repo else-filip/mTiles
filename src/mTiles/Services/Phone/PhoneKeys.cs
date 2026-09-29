@@ -36,6 +36,10 @@ internal static class PhoneKeys
             case "left": key = TileKey.Left; return true;
             case "right": key = TileKey.Right; return true;
             case "escape": key = TileKey.Escape; return true;
+            case "tab": key = TileKey.Tab; return true;
+            case "shifttab": key = TileKey.ShiftTab; return true;
+            case "backspace": key = TileKey.Backspace; return true;
+            case "ctrlc": key = TileKey.CtrlC; return true;
             default: key = default; return false;
         }
     }

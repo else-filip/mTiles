@@ -79,6 +79,48 @@ public sealed class PhoneProtocolTests
     }
 
     [Theory]
+    [InlineData("tab", TileKey.Tab)]
+    [InlineData("shifttab", TileKey.ShiftTab)]
+    [InlineData("backspace", TileKey.Backspace)]
+    [InlineData("ctrlc", TileKey.CtrlC)]
+    public void The_keys_a_shell_is_driven_by_are_in_the_set(string name, TileKey key)
+    {
+        var request = Assert.IsType<TileCommandRequest>(Parse($$"""{"type":"key","tileId":"t","key":"{{name}}"}"""));
+        Assert.Equal(new RemoteKey(key), request.Command);
+    }
+
+    [Fact]
+    public void A_send_carries_its_mode_the_draft_it_replaces_and_the_consent_to_start_over()
+    {
+        var request = Assert.IsType<TileCommandRequest>(Parse(
+            """{"type":"send","tileId":"t","text":"x","submit":true,"mode":"run","replaces":"old","discard":true}"""));
+        Assert.Equal(new RemoteSendText("x", true, "run", "old", true), request.Command);
+    }
+
+    [Fact]
+    public void A_plain_send_from_an_older_page_asks_for_none_of_that()
+    {
+        var request = Assert.IsType<TileCommandRequest>(Parse("""{"type":"send","tileId":"t","text":"x"}"""));
+        Assert.Equal(new RemoteSendText("x", false), request.Command);
+    }
+
+    [Fact]
+    public void Starting_a_tile_over_names_the_tile()
+    {
+        var request = Assert.IsType<TileCommandRequest>(Parse("""{"type":"new","tileId":"t"}"""));
+        Assert.Equal("t", request.TileId);
+        Assert.IsType<RemoteNewConversation>(request.Command);
+        Assert.Null(Parse("""{"type":"new"}"""));
+    }
+
+    [Fact]
+    public void A_recording_can_ask_to_come_back_to_the_phone_rather_than_into_the_tile()
+    {
+        var header = PhoneProtocol.ParseAudioHeader("""{"sampleRate":48000,"tileId":"t","toDraft":true}"""u8);
+        Assert.Equal(new AudioHeader("t", 48000, ToDraft: true), header);
+    }
+
+    [Theory]
     [InlineData("""{"sampleRate":48000,"tileId":"t"}""", 48000, "t")]
     [InlineData("""{"sampleRate":16000}""", 16000, null)]
     [InlineData("""{"sampleRate":44100,"tileId":""}""", 44100, null)]
@@ -116,4 +158,12 @@ public sealed class PhoneProtocolTests
         Assert.False(document.RootElement.GetProperty("ok").GetBoolean());
         Assert.Equal("nope", document.RootElement.GetProperty("error").GetString());
     }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, true)]
+    [InlineData(2, true)]
+    [InlineData(3, false)]
+    public void A_page_is_served_from_the_oldest_version_up_to_this_one(int pageVersion, bool accepted) =>
+        Assert.Equal(accepted, PhoneProtocol.Accepts(pageVersion));
 }

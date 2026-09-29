@@ -81,6 +81,8 @@ public static class TerminalClipboardCoordinator
         try
         {
             if (e.Key != Key.C) return;
+            // A phone's Ctrl+C is the interrupt for the tile it named, never a copy from another one.
+            if (e is mTiles.ViewModels.PressedFromOutsideKeyEventArgs) return;
             if (e.KeyModifiers != KeyModifiers.Control &&
                 e.KeyModifiers != (KeyModifiers.Control | KeyModifiers.Shift)) return;
 

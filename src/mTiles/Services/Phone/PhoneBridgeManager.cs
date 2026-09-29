@@ -459,7 +459,7 @@ public sealed class PhoneBridgeManager : IAsyncDisposable
                 {
                     ok = true,
                     protocol = PhoneProtocol.Version,
-                    compatible = hello.Protocol == PhoneProtocol.Version,
+                    compatible = PhoneProtocol.Accepts(hello.Protocol),
                     app = "mTiles",
                     version = AppInfo.Version,
                     machine = Environment.MachineName,
