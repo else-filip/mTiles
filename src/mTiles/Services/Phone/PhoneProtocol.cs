@@ -64,8 +64,15 @@ internal static class PhoneProtocol
             ? """{"ok":true}"""u8.ToArray()
             : JsonSerializer.SerializeToUtf8Bytes(body, Json);
 
-    public static byte[] Error(string message) =>
-        JsonSerializer.SerializeToUtf8Bytes(new { ok = false, error = message }, Json);
+    public static byte[] Error(string message, string? code = null) =>
+        JsonSerializer.SerializeToUtf8Bytes(new { ok = false, error = message, code }, Json);
+
+    /// <summary>The code a page acts on for a refusal it must recognise — never the sentence, which is for
+    /// reading and may be reworded.</summary>
+    public const string DraftInTheWayCode = ViewModels.RemoteText.DraftInTheWayCode;
+
+    /// <summary>A tile's refusal as the phone receives it: the sentence, and a code where the page acts on it.</summary>
+    public static byte[] Refusal(ViewModels.RemoteRefusal refusal) => Error(refusal.Message, refusal.Code);
 
     public static byte[] Push(string type, object body)
     {
@@ -121,6 +128,15 @@ internal static class PhoneProtocol
                     new TileCommandRequest(t, new RemoteSendText(text, B("submit"), S("mode"), S("replaces"),
                         B("discard"))),
                 "new" when S("tileId") is { Length: > 0 } t => new TileCommandRequest(t, new RemoteNewConversation()),
+                "draft" when S("tileId") is { Length: > 0 } t && S("text") is { } text =>
+                    new TileCommandRequest(t, new RemoteDraft(text, S("seen"))),
+                "pick" when S("tileId") is { Length: > 0 } t && S("picker") is { Length: > 0 } picker
+                            && S("value") is { Length: > 0 } value =>
+                    new TileCommandRequest(t, new RemotePick(picker, value)),
+                "compact" when S("tileId") is { Length: > 0 } t => new TileCommandRequest(t, new RemoteCompact()),
+                "openConversation" when S("tileId") is { Length: > 0 } t && S("conversationId") is { Length: > 0 } c =>
+                    new TileCommandRequest(t, new RemoteOpenConversation(c)),
+                "conversations" when S("tileId") is { Length: > 0 } t => new ConversationsRequest(t),
                 "key" when S("tileId") is { Length: > 0 } t && PhoneKeys.TryParse(S("key"), out var key) =>
                     new TileCommandRequest(t, new RemoteKey(key)),
                 "choose" when S("tileId") is { Length: > 0 } t && S("pendingId") is { Length: > 0 } pending
@@ -209,6 +225,9 @@ internal sealed record OpenWorkspaceRequest(string WorkspaceId) : PhoneRequest;
 internal sealed record WatchRequest(string? WorkspaceId, string? TileId) : PhoneRequest;
 
 internal sealed record TileRequest(string TileId) : PhoneRequest;
+
+/// <summary>The stored conversations a tile can be pointed at.</summary>
+internal sealed record ConversationsRequest(string TileId) : PhoneRequest;
 
 internal sealed record TileCommandRequest(string TileId, RemoteTileCommand Command) : PhoneRequest;
 

@@ -84,7 +84,7 @@ public class GoalRemoteTests : IDisposable
             using var tile = TileWith(state);
 
             Assert.StartsWith("Starting a new goal discards this one",
-                Handle(tile, new RemoteSendText("another goal", Submit: true)));
+                Handle(tile, new RemoteSendText("another goal", Submit: true))?.Message);
         });
     }
 
@@ -158,7 +158,7 @@ public class GoalRemoteTests : IDisposable
     private static RemotePending PendingOf(GoalTileViewModel tile) =>
         Assert.IsType<RemotePending>(tile.DescribeForRemote().Chat?.Pending);
 
-    private static string? Handle(GoalTileViewModel tile, RemoteTileCommand command) =>
+    private static RemoteRefusal? Handle(GoalTileViewModel tile, RemoteTileCommand command) =>
         tile.HandleRemoteAsync(command).GetAwaiter().GetResult();
 
     private GoalTileViewModel TileWith(GoalTileState state)

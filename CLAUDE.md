@@ -1776,6 +1776,15 @@ What is worth knowing before touching `Services/Phone/` or `site/phone/`:
   Review changes), Resume and Review again as actions, and **New goal** / New conversation
   (`RemoteNewConversation`): these ask on the phone, which is showing what would be discarded, and the
   answer travels with the command (`Discard`) so the computer's own dialog is never opened under nobody.
+  The Agent and Goal tiles' box is **mirrored as it is typed** (`RemoteDraft`, debounced, one at a time):
+  the computer's composer shows what the phone is writing, and a draft typed at the desk meanwhile stops
+  the mirror rather than being written over. The Agent tile also offers its model, mode and effort
+  (`RemoteComposer.Pickers` — bypass carries its warning, asked on the phone), Compact, and its other
+  conversations (`IRemoteConversationsTile`, asked on demand; opening one is refused while the agent
+  works, rather than asking the computer whether to stop it). Up and Down step through what was said,
+  as the composer's own arrows do. A terminal's screen is **fitted to the phone's width** — the type
+  shrinks to the widest line down to a readable size and wraps past it, and a rule across the terminal
+  is cut to the width — because a sideways scroll reads every line in two halves.
 - **One phone, several computers, all connected at once** (`site/phone/app.js` → *computers*): each
   paired mTiles has its own link and its own picture of its workspaces, so the Computers list says which
   one is waiting for you, a header mark says so from inside another, and switching is instant. The

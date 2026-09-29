@@ -85,16 +85,7 @@ public sealed partial class ConversationChooser : ObservableObject
     public async Task RefreshAsync()
     {
         var refresh = Interlocked.Increment(ref _latestRefresh);
-        IReadOnlyList<ConversationSummary> stored;
-        try
-        {
-            stored = await Task.Run(() => _store.List(_workingDirectory));
-        }
-        catch (Exception ex)
-        {
-            Trace.TraceError($"[AgentConversation] Listing the conversations in {_workingDirectory} failed: {ex}");
-            return;
-        }
+        if (await ReadStoreAsync() is not { } stored) return;
 
         _post(() =>
         {
@@ -102,10 +93,47 @@ public sealed partial class ConversationChooser : ObservableObject
         });
     }
 
+    /// <summary>The list as the store answers it now, without redrawing the tile's own.</summary>
+    /// <remarks>A failed read throws rather than answering the list as it stands: the caller is somebody asking
+    /// what is there, and a stale list would say the read worked.</remarks>
+    public async Task<IReadOnlyList<ConversationOption>> ReadOptionsAsync() => OptionsFor(await ListStoredAsync());
+
+    /// <summary>One stored conversation as the store answers it now; null only when it is gone.</summary>
+    /// <remarks>A failed read throws, so it is never mistaken for a conversation that has been deleted.</remarks>
+    public async Task<ConversationSummary?> FindStoredAsync(string conversationId) =>
+        (await ListStoredAsync()).FirstOrDefault(c => c.Id == conversationId);
+
+    private Task<IReadOnlyList<ConversationSummary>> ListStoredAsync() =>
+        Task.Run(() => _store.List(_workingDirectory));
+
+    private async Task<IReadOnlyList<ConversationSummary>?> ReadStoreAsync()
+    {
+        try
+        {
+            return await ListStoredAsync();
+        }
+        catch (Exception ex)
+        {
+            Trace.TraceError($"[AgentConversation] Listing the conversations in {_workingDirectory} failed: {ex}");
+            return null;
+        }
+    }
+
     private bool IsLatestRefresh(int refresh) => refresh == Volatile.Read(ref _latestRefresh);
 
     /// <summary>Rebuilds the list from what the store answered, with the open conversation always in it.</summary>
     public void Draw(IReadOnlyList<ConversationSummary> stored)
+    {
+        var options = OptionsFor(stored);
+        WhileDrawing(() =>
+        {
+            Options.Clear();
+            foreach (var option in options) Options.Add(option);
+            Selected = Options.FirstOrDefault(option => option.IsCurrent);
+        });
+    }
+
+    private List<ConversationOption> OptionsFor(IReadOnlyList<ConversationSummary> stored)
     {
         var current = _current();
         // An empty id is a tile that has not been given one yet, not a conversation: synthesizing a row for
@@ -113,13 +141,7 @@ public sealed partial class ConversationChooser : ObservableObject
         var known = current.Length == 0 || stored.Any(c => c.Id == current)
             ? stored
             : [new ConversationSummary(current, _currentAgentId(), DateTimeOffset.Now, null), .. stored];
-
-        WhileDrawing(() =>
-        {
-            Options.Clear();
-            foreach (var summary in known) Options.Add(OptionFor(summary, current));
-            Selected = Options.FirstOrDefault(option => option.IsCurrent);
-        });
+        return known.Select(summary => OptionFor(summary, current)).ToList();
     }
 
     /// <summary>Puts the selection back on the open conversation, leaving the list as it stands.</summary>

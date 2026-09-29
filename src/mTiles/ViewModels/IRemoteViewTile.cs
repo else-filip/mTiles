@@ -30,7 +30,17 @@ public interface IRemoteViewTile : ITile
     /// <returns>Null when it was done; otherwise one sentence the phone shows, naming why not.</returns>
     /// <remarks>What a paired device can cause is decided here, in this process, against what the tile
     /// offers <em>now</em> — the phone's picture is as old as the last one it was sent.</remarks>
-    Task<string?> HandleRemoteAsync(RemoteTileCommand command);
+    Task<RemoteRefusal?> HandleRemoteAsync(RemoteTileCommand command);
+}
+
+/// <summary>
+/// Tile content that holds one of several stored conversations, and can list them for a phone.
+/// </summary>
+/// <remarks>Asked on demand rather than pushed: the list is a query across the store and changes only when
+/// somebody says something. Opening one is <see cref="RemoteOpenConversation"/>.</remarks>
+public interface IRemoteConversationsTile : ITile
+{
+    Task<IReadOnlyList<RemoteConversation>> ConversationsForRemoteAsync();
 }
 
 /// <summary>

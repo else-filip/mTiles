@@ -151,7 +151,9 @@ export class Connection {
       throw new Error("mTiles did not answer. It may be off, asleep, or offline.");
     }
     const answer = JSON.parse(text);
-    if (answer.ok === false) throw new Error(answer.error ?? "mTiles could not do that.");
+    if (answer.ok === false) {
+      throw Object.assign(new Error(answer.error ?? "mTiles could not do that."), { code: answer.code ?? null });
+    }
     return answer;
   }
 

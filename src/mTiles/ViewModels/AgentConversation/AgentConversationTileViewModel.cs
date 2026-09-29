@@ -38,7 +38,7 @@ namespace mTiles.ViewModels.AgentConversation;
 /// </remarks>
 public sealed partial class AgentConversationTileViewModel : ObservableObject,
     IBusyTile, IMaximizableTile, ITextInputTile, IDescribedTile, ITileActions, IAgentTile, IProcessTile,
-    INewConversationTile, IRemoteViewTile, IRemotePreviewTile
+    INewConversationTile, IRemoteViewTile, IRemotePreviewTile, IRemoteConversationsTile
 {
     public const string NewConversationActionId = TileActionIds.NewConversation;
 
@@ -593,7 +593,7 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
 
     /// <summary>A message typed on a phone replaces the draft rather than joining it: it is a whole
     /// message of its own, and glued onto a half-typed sentence on the desktop it would be neither.</summary>
-    private string? SendRemoteText(string text, bool submit, string? seen = null)
+    private RemoteRefusal? SendRemoteText(string text, bool submit, string? seen = null)
     {
         if (RemoteText.WouldOverwrite(Draft, text, seen)) return RemoteText.DraftInTheWay;
         Draft = text;
@@ -787,7 +787,10 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
     /// takes it), when the session applied it, or when it asks for a restart. A change the host refuses under a
     /// working agent is not kept, or the next launch would quietly start with what the screen says did not
     /// happen.</remarks>
-    public async Task ChangeSettingsAsync(SessionSettings change)
+    public Task ChangeSettingsAsync(SessionSettings change) => RunAsync(() => ApplySettingsAsync(change));
+
+    /// <summary><see cref="ChangeSettingsAsync"/> with a failure left to the caller — a phone has to be told.</summary>
+    private async Task ApplySettingsAsync(SessionSettings change)
     {
         if (change.IsEmpty) return;
         if (_host is not { } host || !host.HasSession)
@@ -797,7 +800,7 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
             return;
         }
 
-        await RunAsync(() => host.ExecuteAsync(new ChangeSessionSettings(change), _lifetime.Token));
+        await host.ExecuteAsync(new ChangeSessionSettings(change), _lifetime.Token);
     }
 
     /// <summary>
@@ -837,10 +840,7 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
     /// </summary>
     private async Task ConfirmBypassThenChangeAsync(SessionOption mode)
     {
-        var agreed = ConfirmAction is not null && await ConfirmAction(
-            "Run this agent with no permission checks at all?\n\n" +
-            "It will edit, create and delete files and run commands in this workspace without asking. " +
-            "This applies to this tile, until you change it back.");
+        var agreed = ConfirmAction is not null && await ConfirmAction(BypassWarning);
 
         if (agreed) await ChangeSettingsAsync(new SessionSettings(Mode: mode.Id));
         else if (_host is { } host) DrawSettings(host.State);
@@ -1343,6 +1343,9 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
         await RunAsync(() => host.ExecuteAsync(new CompactContext(), _lifetime.Token));
     }
 
+    /// <summary>Why a phone's command cannot reach an agent that is not up.</summary>
+    private string NotReadyRefusal() => IsStarting ? "The agent is still starting." : "The agent is not running.";
+
     private bool CanCompactNow() => CanCompact && !IsWorking && CanSend();
 
     /// <summary>Why the button is worth pressing, and — where it is urgent — why it is coloured.</summary>
@@ -1444,26 +1447,34 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
     /// <para>Serialized on the same gate as an agent switch: both replace the host, and two of them at once
     /// would leave whichever finished last in charge rather than whichever was picked last.</para>
     /// </remarks>
-    public async Task SwitchConversationAsync(ConversationSummary summary)
+    public async Task SwitchConversationAsync(ConversationSummary summary) =>
+        await SwitchConversationAsync(summary, () => ConfirmInterruptingTurnAsync(
+            "Open another conversation? The agent is working, and this stops what it is doing."));
+
+    /// <summary>The switch itself, asking <paramref name="mayInterrupt"/> whether a turn in flight may end;
+    /// answers null once the tile shows <paramref name="summary"/>, and otherwise why it does not.</summary>
+    private async Task<string?> SwitchConversationAsync(ConversationSummary summary, Func<Task<bool>> mayInterrupt)
     {
-        if (summary.Id == ConversationId) return;
+        if (summary.Id == ConversationId) return null;
+        string? refusal = "Another conversation was picked on the computer meanwhile.";
         // Picked again before this one had its turn: the later pick is the one the user meant, and without this
         // the one in between still has its agent spawned and torn down. The rule SwitchInstanceAsync keeps.
         _latestConversationPick = summary;
         await UnderSwitchGateAsync(async () =>
         {
             if (!ReferenceEquals(_latestConversationPick, summary)) return;
-            if (RefusalFor(summary) is not null)
+            if (RefusalFor(summary) is { } refused)
             {
+                refusal = refused;
                 // Refused since the list was drawn — another tile took it, or its agent's instance went — so the
                 // list is read again, which is what puts the row back dimmed with the sentence saying why.
                 await Conversations.RefreshAsync();
                 return;
             }
 
-            if (!await ConfirmInterruptingTurnAsync(
-                    "Open another conversation? The agent is working, and this stops what it is doing."))
+            if (!await mayInterrupt())
             {
+                refusal = "The agent started working. Stop it first, then open the other conversation.";
                 Conversations.RestoreSelection();
                 return;
             }
@@ -1472,6 +1483,7 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
             {
                 if (InstanceOf(summary.AgentId) is not { } instance)
                 {
+                    refusal = "The agent this conversation is held with is no longer available here.";
                     Conversations.RestoreSelection();
                     return;
                 }
@@ -1480,7 +1492,9 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
             }
 
             await MoveToConversationAsync(summary.Id);
+            refusal = null;
         });
+        return refusal;
     }
 
     /// <summary>One thing that moves the tile off its conversation at a time.</summary>
@@ -1884,95 +1898,6 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
         catch (Exception ex)
         {
             Trace.TraceError($"[AgentConversation] {ex}");
-        }
-    }
-
-    // ── A paired phone ───────────────────────────────────────────────────────────────────────
-
-    /// <summary>The conversation as last drawn, which is what a phone is shown — the same state the
-    /// transcript above was synced from, so the two cannot disagree.</summary>
-    private ConversationState _remoteState = ConversationState.Empty;
-
-    private long _remoteVersion;
-
-    /// <inheritdoc />
-    /// <remarks>Moves with every property this tile raises, which includes every draw: conservative, and
-    /// a counter costs nothing, while missing a change costs a phone showing a stale answer.</remarks>
-    public long RemoteVersion => Interlocked.Read(ref _remoteVersion);
-
-    protected override void OnPropertyChanged(System.ComponentModel.PropertyChangedEventArgs e)
-    {
-        Interlocked.Increment(ref _remoteVersion);
-        base.OnPropertyChanged(e);
-    }
-
-    /// <inheritdoc />
-    public RemoteTileBody DescribeForRemote()
-    {
-        var chat = AgentChatProjection.Project(_remoteState);
-        var status = LaunchProblem ?? (StatusText.Length > 0 ? StatusText : null);
-        var canType = CanSend();
-
-        return new RemoteTileBody(
-            "chat",
-            new RemoteStatus(RemoteActivity.Of(Activity), status, HeaderNote.Length > 0 ? HeaderNote : null,
-                ContextPercent),
-            Chat: chat,
-            Composer: new RemoteComposer(
-                canType,
-                canType ? "Message the agent" : IsStarting ? "The agent is starting…" : "The agent is not running",
-                CanInterrupt: IsBusy && CanInterrupt,
-                Draft: Draft.Length > 0 ? Draft : null),
-            NewLabel: "New conversation");
-    }
-
-    /// <inheritdoc />
-    public TilePreview? PreviewForRemote() =>
-        LaunchProblem is { } problem
-            ? new TilePreview(problem)
-            : AgentChatProjection.Preview(_remoteState, ContextPercent);
-
-    /// <inheritdoc />
-    /// <remarks>Answers are checked against the request the agent is waiting on <em>now</em>: the phone's
-    /// id is as old as the last picture it was sent, and an approval answered after it was replaced must
-    /// not be read as an answer to the next one.</remarks>
-    public async Task<string?> HandleRemoteAsync(RemoteTileCommand command)
-    {
-        switch (command)
-        {
-            case RemoteSendText send:
-                if (!CanSend()) return IsStarting ? "The agent is still starting." : "The agent is not running.";
-                return SendRemoteText(send.Text, send.Submit, send.Replaces);
-
-            case RemoteNewConversation:
-                // Asked on the phone, over the transcript it is showing; the computer's own question would
-                // wait on a screen nobody at the phone can see.
-                await StartNewConversationCoreAsync(askFirst: false);
-                return null;
-
-            case RemoteKey key:
-                return TryPressKey(key.Key) ? null : "That key does nothing here.";
-
-            case RemoteInterrupt:
-                if (!IsBusy) return "The agent is not working on anything.";
-                await InterruptAsync();
-                return null;
-
-            case RemoteChoose choose:
-                if (AgentChatProjection.ResolveChoice(_remoteState, choose.PendingId, choose.OptionId, out var refusal)
-                    is not var (approval, decision))
-                    return refusal;
-                await AnswerApprovalAsync(approval.RequestId, decision);
-                return null;
-
-            case RemoteAnswer answer:
-                if (_remoteState.PendingQuestions.All(q => q.RequestId != answer.PendingId))
-                    return "Those questions have already been answered.";
-                await AnswerQuestionsAsync(answer.PendingId, answer.Answers);
-                return null;
-
-            default:
-                return "The agent cannot do that from a phone.";
         }
     }
 

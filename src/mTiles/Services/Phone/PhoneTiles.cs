@@ -61,7 +61,8 @@ internal static class PhoneTiles
             body.Screen,
             body.Composer ?? RemoteComposer.None,
             [.. PhoneTileActions.ForPhone(leaf.Actions).Select(a => new RemoteAction(a.Id, a.Label, a.Icon, a.IsEnabled))],
-            body.NewLabel);
+            body.NewLabel,
+            ListsConversations: leaf.Content is IRemoteConversationsTile);
     }
 
     /// <summary>
@@ -83,7 +84,7 @@ internal static class PhoneTiles
 
     /// <summary>Does what the phone asked, in this tile. UI thread only.</summary>
     /// <returns>Null when done, otherwise the sentence the phone shows.</returns>
-    public static async Task<string?> HandleAsync(LeafTileNodeViewModel leaf, RemoteTileCommand command)
+    public static async Task<RemoteRefusal?> HandleAsync(LeafTileNodeViewModel leaf, RemoteTileCommand command)
     {
         if (leaf.Content is IRemoteViewTile remote)
             return await remote.HandleRemoteAsync(command).ConfigureAwait(true);

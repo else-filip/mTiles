@@ -69,6 +69,8 @@ public sealed record TilePreview(string? Text, double? ContextPercent = null, Da
 /// <summary>One tile, zoomed into.</summary>
 /// <param name="View">Which body the page draws: <c>chat</c>, <c>terminal</c>, or <c>none</c> for a
 /// tile that offers only actions.</param>
+/// <param name="ListsConversations">Whether the tile can be asked for the other conversations it could show
+/// (<see cref="ViewModels.IRemoteConversationsTile"/>), so the page offers them only where they exist.</param>
 public sealed record RemoteTileView(
     string TileId,
     string WorkspaceId,
@@ -80,7 +82,8 @@ public sealed record RemoteTileView(
     RemoteScreen? Screen,
     RemoteComposer Composer,
     IReadOnlyList<RemoteAction> Actions,
-    string? NewLabel = null);
+    string? NewLabel = null,
+    bool ListsConversations = false);
 
 /// <summary>What the content of a tile says about itself — the part of <see cref="RemoteTileView"/>
 /// the tile knows and its leaf does not.</summary>
@@ -169,11 +172,32 @@ public sealed record RemoteAction(string Id, string Label, string Icon, bool Ena
 /// Set goal &amp; run, Review, Detect goal — or null.</param>
 /// <param name="StartsOver">Whether sending now replaces what the tile holds (a finished goal's
 /// transcript), so the page asks first and says it did.</param>
+/// <param name="Pickers">What the next message runs as — model, permission mode, effort — each with the
+/// value it has now and what it can be changed to; null for a tile with none.</param>
+/// <param name="CanCompact">Whether the agent can be asked, now, to summarise its context.</param>
+/// <param name="SyncsDraft">Whether what is typed on the phone may be mirrored into the tile's own input as
+/// it is typed (<see cref="RemoteDraft"/>).</param>
 public sealed record RemoteComposer(bool Enabled, string Placeholder, bool Keys = false, bool CanInterrupt = false,
-    string? Draft = null, IReadOnlyList<RemoteSendMode>? Modes = null, bool StartsOver = false)
+    string? Draft = null, IReadOnlyList<RemoteSendMode>? Modes = null, bool StartsOver = false,
+    IReadOnlyList<RemotePicker>? Pickers = null, bool CanCompact = false, bool SyncsDraft = false)
 {
     public static readonly RemoteComposer None = new(false, "");
 }
+
+/// <summary>One of the composer's settings, as the phone offers it.</summary>
+/// <param name="Id"><c>model</c>, <c>mode</c> or <c>effort</c>.</param>
+/// <param name="Value">The id of what it is set to now, or null where nothing is known yet.</param>
+/// <param name="Custom">Whether a value not in <paramref name="Choices"/> may be typed — a model name.</param>
+public sealed record RemotePicker(string Id, string Label, string? Value, string? ValueLabel,
+    IReadOnlyList<RemoteChoice> Choices, bool Custom = false);
+
+/// <param name="Warning">A sentence the phone asks the user to agree to before choosing it — bypassing
+/// every permission check — or null.</param>
+public sealed record RemoteChoice(string Id, string Label, string? Warning = null);
+
+/// <summary>One stored conversation a tile can be pointed at.</summary>
+/// <param name="Reason">Why it cannot be opened from here, or null.</param>
+public sealed record RemoteConversation(string Id, string Title, string Note, bool Current, string? Reason);
 
 /// <summary>One way of sending the composer's text other than the plain one.</summary>
 /// <param name="NeedsText">True when it sends what is typed, false when it works without any (a goal read
@@ -195,6 +219,20 @@ public sealed record RemoteSendText(string Text, bool Submit, string? Mode = nul
 /// <summary>Starts the tile over — a new goal, a new conversation — which the phone has already asked
 /// about.</summary>
 public sealed record RemoteNewConversation : RemoteTileCommand;
+
+/// <summary>What is typed on the phone, mirrored into the tile's own input as it is typed — sent nowhere.</summary>
+/// <param name="Seen">The tile's draft as the phone was last shown it; see <see cref="RemoteSendText.Replaces"/>.</param>
+public sealed record RemoteDraft(string Text, string? Seen) : RemoteTileCommand;
+
+/// <summary>Sets one of the composer's <see cref="RemoteComposer.Pickers"/>. A choice carrying a warning
+/// arrives only after the phone has asked.</summary>
+public sealed record RemotePick(string Picker, string Value) : RemoteTileCommand;
+
+/// <summary>Asks the agent to summarise its context and carry on from the summary; asked on the phone.</summary>
+public sealed record RemoteCompact : RemoteTileCommand;
+
+/// <summary>Points the tile at another of its stored conversations.</summary>
+public sealed record RemoteOpenConversation(string ConversationId) : RemoteTileCommand;
 
 public sealed record RemoteKey(TileKey Key) : RemoteTileCommand;
 

@@ -507,7 +507,7 @@ public partial class TerminalTileViewModel : ObservableObject, IBusyTile, ICusto
     protected virtual string? RemoteDetail => null;
 
     /// <inheritdoc />
-    public Task<string?> HandleRemoteAsync(RemoteTileCommand command) => Task.FromResult(command switch
+    public Task<RemoteRefusal?> HandleRemoteAsync(RemoteTileCommand command) => Task.FromResult<RemoteRefusal?>(command switch
     {
         RemoteSendText send => TrySendText(send.Text, send.Submit) ? null : "The shell in this tile is not running.",
         RemoteKey key => TryPressKey(key.Key) ? null : "The shell in this tile is not running.",

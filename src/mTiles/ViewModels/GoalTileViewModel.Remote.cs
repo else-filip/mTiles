@@ -49,7 +49,8 @@ public partial class GoalTileViewModel
                 CanInterrupt: IsRunning && !IsPaused,
                 Draft: InputText.Length > 0 ? InputText : null,
                 Modes: RemoteModes(),
-                StartsOver: StartingOverWouldAskHere()),
+                StartsOver: StartingOverWouldAskHere(),
+                SyncsDraft: true),
             NewLabel: "New goal");
     }
 
@@ -184,9 +185,9 @@ public partial class GoalTileViewModel
         Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(content)), 0, 8);
 
     /// <inheritdoc />
-    public Task<string?> HandleRemoteAsync(RemoteTileCommand command) => Task.FromResult(HandleRemote(command));
+    public Task<RemoteRefusal?> HandleRemoteAsync(RemoteTileCommand command) => Task.FromResult(HandleRemote(command));
 
-    private string? HandleRemote(RemoteTileCommand command)
+    private RemoteRefusal? HandleRemote(RemoteTileCommand command)
     {
         switch (command)
         {
@@ -207,6 +208,11 @@ public partial class GoalTileViewModel
 
                 StartAnswered(send.Discard,
                     () => ShowApproval ? ApproveOrChangeCommand.ExecuteAsync(null) : SubmitCommand.ExecuteAsync(null));
+                return null;
+
+            case RemoteDraft typed:
+                if (RemoteText.WouldOverwrite(InputText, typed.Text, typed.Seen)) return RemoteText.DraftInTheWay;
+                InputText = typed.Text;
                 return null;
 
             case RemoteNewConversation:
@@ -259,7 +265,7 @@ public partial class GoalTileViewModel
         "Starting a new goal discards this one. Reload the page on the phone, or press + on the computer first.";
 
     /// <summary>One of <see cref="RemoteModes"/>, run through the command the desktop's own control runs.</summary>
-    private string? HandleRemoteMode(string mode, RemoteSendText send)
+    private RemoteRefusal? HandleRemoteMode(string mode, RemoteSendText send)
     {
         if (!CanSetGoal)
             return IsRunning ? "The goal is running. Pause it first, or wait for it to stop." : "That is not on offer right now.";

@@ -499,9 +499,15 @@ public sealed class PhoneBridgeManager : IAsyncDisposable
                     ? PhoneProtocol.Ok(new { ok = true, tile = view })
                     : PhoneProtocol.Error("That tile is no longer there.");
 
+            case ConversationsRequest list:
+                var (conversations, problem) = await ListConversationsAsync(list.TileId).ConfigureAwait(false);
+                return conversations is not null
+                    ? PhoneProtocol.Ok(new { ok = true, conversations })
+                    : PhoneProtocol.Error(problem ?? "mTiles could not list the conversations.");
+
             case TileCommandRequest command:
                 return await RunTileCommandAsync(command).ConfigureAwait(false) is { } refusal
-                    ? PhoneProtocol.Error(refusal)
+                    ? PhoneProtocol.Refusal(refusal)
                     : PhoneProtocol.Ok();
 
             case ActionRequest action:
@@ -514,25 +520,47 @@ public sealed class PhoneBridgeManager : IAsyncDisposable
         }
     }
 
-    private Task<string?> RunTileCommandAsync(TileCommandRequest request) =>
+    private Task<RemoteRefusal?> RunTileCommandAsync(TileCommandRequest request) =>
+        OnTileAsync<RemoteRefusal?>(request.TileId, "That tile is no longer there.", async tile =>
+        {
+            var result = await PhoneTiles.HandleAsync(tile, request.Command).ConfigureAwait(true);
+            _ = PushNowAsync();
+            return result;
+        }, failure: "mTiles could not do that.");
+
+    /// <summary>The tile's conversations, or the sentence saying why there are none to show: a missing tile,
+    /// a tile holding no conversations and a list that could not be read are three different answers.</summary>
+    private Task<ConversationsAnswer> ListConversationsAsync(string tileId) =>
+        OnTileAsync(tileId, ConversationsAnswer.Failed("That tile is no longer there."), async tile =>
+            tile.Content is IRemoteConversationsTile conversations
+                ? new ConversationsAnswer(await conversations.ConversationsForRemoteAsync().ConfigureAwait(true), null)
+                : ConversationsAnswer.Failed("That tile holds no conversations."),
+            failure: ConversationsAnswer.Failed("mTiles could not list the conversations."));
+
+    private sealed record ConversationsAnswer(IReadOnlyList<RemoteConversation>? Conversations, string? Problem)
+    {
+        public static ConversationsAnswer Failed(string problem) => new(null, problem);
+    }
+
+    /// <summary>Runs <paramref name="work"/> on the UI thread against the tile a phone named.</summary>
+    /// <remarks>
+    /// Wrapped: this runs the tile's own code, synchronously on this thread — a key press ends in a
+    /// RaiseEvent through the application's own handlers — and a throw from any of it must cost the
+    /// phone a sentence, not the request.
+    /// </remarks>
+    private Task<T> OnTileAsync<T>(string tileId, T whenGone, Func<LeafTileNodeViewModel, Task<T>> work, T failure) =>
         _dispatcher.InvokeAsync(async () =>
         {
-            if (_workspaces.Find(request.TileId) is not { } hit)
-                return "That tile is no longer there.";
-
-            // Wrapped: this runs the tile's own code, synchronously on this thread — a key press ends in a
-            // RaiseEvent through the application's own handlers — and a throw from any of it must cost the
-            // phone a sentence, not the request.
+            if (_workspaces.Find(tileId) is not { } hit)
+                return whenGone;
             try
             {
-                var result = await PhoneTiles.HandleAsync(hit.Tile, request.Command).ConfigureAwait(true);
-                _ = PushNowAsync();
-                return result;
+                return await work(hit.Tile).ConfigureAwait(true);
             }
             catch (Exception ex)
             {
-                Trace.TraceWarning("A phone command in a tile failed: {0}", ex);
-                return "mTiles could not do that.";
+                Trace.TraceWarning("A phone request in a tile failed: {0}", ex);
+                return failure;
             }
         }).Unwrap();
 

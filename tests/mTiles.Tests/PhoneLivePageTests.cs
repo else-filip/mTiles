@@ -170,11 +170,11 @@ public sealed class PhoneLivePageTests
                 Composer: new RemoteComposer(true, "Message the agent", CanInterrupt: _approved));
         }
 
-        public Task<string?> HandleRemoteAsync(RemoteTileCommand command)
+        public Task<RemoteRefusal?> HandleRemoteAsync(RemoteTileCommand command)
         {
             log($"chat {command}");
             if (command is RemoteChoose) { _approved = true; Interlocked.Increment(ref _version); }
-            return Task.FromResult<string?>(null);
+            return Task.FromResult<RemoteRefusal?>(null);
         }
 
         public IReadOnlyList<TileAction> Actions => [new("continue", "Continue", "play")];
@@ -209,10 +209,10 @@ public sealed class PhoneLivePageTests
             ], "pwsh"),
             Composer: new RemoteComposer(true, "Type into the terminal", Keys: true));
 
-        public Task<string?> HandleRemoteAsync(RemoteTileCommand command)
+        public Task<RemoteRefusal?> HandleRemoteAsync(RemoteTileCommand command)
         {
             log($"terminal {command}");
-            return Task.FromResult<string?>(null);
+            return Task.FromResult<RemoteRefusal?>(null);
         }
 
         public void Dispose() { }

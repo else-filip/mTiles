@@ -92,6 +92,7 @@ const ICONS = {
   plus: ["M12 5v14", "M5 12h14"],
   history: ["M4 12a8 8 0 1 0 2.3-5.7", "M4 4v4h4", "M12 8v4l3 2"],
   edit: ["M4 20h4L19 9l-4-4L4 16z", "M13 7l4 4"],
+  chevron: ["M8 10l4 4 4-4"],
   dot: ["M12 12h.01"],
 };
 

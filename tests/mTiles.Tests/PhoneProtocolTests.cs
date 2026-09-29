@@ -54,6 +54,22 @@ public sealed class PhoneProtocolTests
     public void Anything_else_is_nothing(string json) => Assert.Null(Parse(json));
 
     [Fact]
+    public void A_refusal_the_page_acts_on_carries_the_tiles_own_code()
+    {
+        var reworded = RemoteText.DraftInTheWay with { Message = "Worded some other way." };
+        using var answer = JsonDocument.Parse(PhoneProtocol.Refusal(reworded));
+        Assert.Equal("Worded some other way.", answer.RootElement.GetProperty("error").GetString());
+        Assert.Equal(PhoneProtocol.DraftInTheWayCode, answer.RootElement.GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public void A_refusal_that_is_only_read_carries_no_code()
+    {
+        using var answer = JsonDocument.Parse(PhoneProtocol.Refusal("That key does nothing here."));
+        Assert.Equal(JsonValueKind.Null, answer.RootElement.TryGetProperty("code", out var c) ? c.ValueKind : JsonValueKind.Null);
+    }
+
+    [Fact]
     public void A_request_past_the_limit_is_not_read()
     {
         var text = new string('x', PhoneProtocol.MaxRequestBytes);
@@ -111,6 +127,22 @@ public sealed class PhoneProtocolTests
         Assert.Equal("t", request.TileId);
         Assert.IsType<RemoteNewConversation>(request.Command);
         Assert.Null(Parse("""{"type":"new"}"""));
+    }
+
+    [Fact]
+    public void The_composer_s_own_requests_name_the_tile_and_what_they_carry()
+    {
+        Assert.Equal(new RemoteDraft("x", "y"),
+            Assert.IsType<TileCommandRequest>(Parse("""{"type":"draft","tileId":"t","text":"x","seen":"y"}""")).Command);
+        Assert.Equal(new RemoteDraft("", null),
+            Assert.IsType<TileCommandRequest>(Parse("""{"type":"draft","tileId":"t","text":""}""")).Command);
+        Assert.Equal(new RemotePick("mode", "auto"),
+            Assert.IsType<TileCommandRequest>(Parse("""{"type":"pick","tileId":"t","picker":"mode","value":"auto"}""")).Command);
+        Assert.IsType<RemoteCompact>(Assert.IsType<TileCommandRequest>(Parse("""{"type":"compact","tileId":"t"}""")).Command);
+        Assert.Equal(new RemoteOpenConversation("c"),
+            Assert.IsType<TileCommandRequest>(Parse("""{"type":"openConversation","tileId":"t","conversationId":"c"}""")).Command);
+        Assert.Equal(new ConversationsRequest("t"), Parse("""{"type":"conversations","tileId":"t"}"""));
+        Assert.Null(Parse("""{"type":"pick","tileId":"t","picker":"mode"}"""));
     }
 
     [Fact]

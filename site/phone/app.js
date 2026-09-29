@@ -13,6 +13,7 @@ import { layoutRects, isLegible, readingOrder } from "./geometry.js";
 import { Connection, knownMachines, lastMachineId, setLastMachine, takeInvitationFromUrl, parseInvitation, forgetMachine, PROTOCOL } from "./connection.js";
 import { Dictation } from "./dictation.js";
 import { ago } from "./format.js";
+import { DraftMirror } from "./mirror.js";
 import { isUp, attentionOf, computerStatus } from "./computers.js";
 import { orderWorkspaces, matchesQuery, FILTER_THRESHOLD } from "./workspaces.js";
 
@@ -294,6 +295,8 @@ function go(level, { machineId, workspaceId, tileId, from } = {}, push = true) {
   // What was left is named on the computer it belonged to, before a switch moves the page to another.
   const leftTile = before === "tile" ? state.tileId : null;
   const leftMachine = currentId;
+  // The last keystrokes' mirror goes out now, for the tile being left, rather than being dropped with it.
+  if (leftTile && (level !== "tile" || tileId !== leftTile)) mirror.flush();
   if (level !== "computers" && machineId && machineId !== currentId && machines.has(machineId)) switchTo(machineId);
   state.level = level;
   if (workspaceId !== undefined) state.workspaceId = workspaceId;
@@ -310,6 +313,8 @@ function go(level, { machineId, workspaceId, tileId, from } = {}, push = true) {
     draft = kept?.text ?? "";
     adoptedDraft = kept?.adopted ?? null;
     remoteDraft = null;
+    mirror.forget();
+    historyAt = -1;
   }
   if (level !== "tile") { state.tile = null; lastTileKey = lastDockKey = null; }
   if (depth(level) <= depth("workspaces")) state.layout = null;
@@ -545,9 +550,13 @@ function drawComputers() {
   wsPage = null;
 }
 
+/** A panel from the bottom over a dimmed page; a tap on the dimmed part closes it, as Close does. What is
+ *  handed back is the whole layer, so `remove()` takes both. */
 function sheet(...children) {
-  root.querySelector(".sheet")?.remove();
-  const el = h("div.sheet", children, h("button.quiet", { onclick: () => el.remove() }, "Close"));
+  root.querySelector(".sheet-layer")?.remove();
+  const el = h("div.sheet-layer",
+    h("div.scrim", { onclick: () => el.remove() }),
+    h("div.sheet", { role: "dialog" }, children, h("button.quiet", { onclick: () => el.remove() }, "Close")));
   root.append(el);
   return el;
 }
@@ -699,10 +708,12 @@ function tileCard(leaf, row = false) {
     title: leaf.reachable ? leaf.name : `${leaf.name} — not available from a phone`,
     onclick: (e) => go("tile", { tileId: leaf.tileId, from: e.currentTarget }),
   },
-    h("span.tile-head", activityMark(leaf.activity), h("span.tile-kind", KINDS[leaf.kind] ?? leaf.kind),
-      since ? h("span.tile-age", { title: "since it last did something" }, since) : null),
+    // The name first — it is what a tile is found by — with its state beside it; the kind under it, quiet
+    // and in the kind's colour; then what it is doing, taking whatever room the card has left.
+    h("span.tile-head", h("span.tile-name", leaf.name), activityMark(leaf.activity)),
+    h("span.tile-kind", KINDS[leaf.kind] ?? leaf.kind,
+      since ? h("span.tile-age", { title: "since it last did something" }, ` · ${since}`) : null),
     preview?.text ? h("span.tile-preview", preview.text) : null,
-    h("span.tile-name", leaf.name),
     context != null ? h("span.tile-context", {
       class: context >= 80 ? "high" : "",
       title: `${Math.round(context)}% of the context used`,
@@ -752,6 +763,7 @@ function drawTileBody(tile) {
     fill(view, body);
   }
   body.dataset.tile = tile.tileId;
+  fitScreen(body.querySelector(".screen"));
   scrollToEnd(atEnd);
 }
 
@@ -882,8 +894,45 @@ function pendingBlock(tile, pending) {
 
 function screenView(tile) {
   const pre = h("pre.screen");
-  pre.textContent = (tile.screen?.lines ?? []).join("\n");
+  pre.dataset.lines = JSON.stringify(tile.screen?.lines ?? []);
   return pre;
+}
+
+/**
+ * Draws a terminal's screen to fit the phone's width, with no sideways scrolling: the type shrinks to the
+ * widest line down to a size still readable, and past that the lines wrap. A rule drawn across the whole
+ * terminal — a line of nothing but ─ — is cut to the width instead, or it would wrap into a stack of
+ * rules. The screen is the desktop's, many columns wider than a phone, and a sideways scroll there means
+ * reading every line in two halves.
+ */
+function fitScreen(pre) {
+  if (!pre?.isConnected) return;
+  const lines = JSON.parse(pre.dataset.lines ?? "[]").map((l) => l.replace(/\s+$/, ""));
+  const style = getComputedStyle(pre);
+  const room = pre.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  const perPx = charWidth(style.fontFamily);
+  const widest = Math.max(1, ...lines.filter((l) => !isRule(l)).map((l) => [...l].length));
+  const size = Math.max(SCREEN_MIN_PX, Math.min(SCREEN_MAX_PX, room / (widest * perPx)));
+  const columns = Math.max(10, Math.floor(room / (size * perPx)));
+  pre.style.fontSize = `${size.toFixed(2)}px`;
+  pre.textContent = lines.map((l) => (isRule(l) ? [...l].slice(0, columns).join("") : l)).join("\n");
+}
+
+/** A line of nothing but box-drawing dashes: a rule drawn across the terminal, not text to fit. */
+const isRule = (line) => /^[\s─━═┄┈╌\-_]+$/.test(line);
+
+const SCREEN_MIN_PX = 8.5;
+const SCREEN_MAX_PX = 12;
+const widths = new Map();
+
+/** How wide one character of this monospace face is, per pixel of type size. */
+function charWidth(family) {
+  if (!widths.has(family)) {
+    const ctx = document.createElement("canvas").getContext("2d");
+    ctx.font = `100px ${family}`;
+    widths.set(family, ctx.measureText("M".repeat(20)).width / 2000 || 0.6);
+  }
+  return widths.get(family);
 }
 
 function actionsOnlyView(tile) {
@@ -920,6 +969,48 @@ let remoteDraft = null;
  *  cleared here on purpose. */
 let adoptedDraft = null;
 let micHeldSince = 0;
+/** Where ↑/↓ are in the list of previous messages: -1 is the box as it was before the first ↑. */
+let historyAt = -1;
+let historyStash = "";
+
+/** The open tile's box, mirrored into the computer's as it is typed (see mirror.js). */
+const mirror = new DraftMirror({
+  capture: currentMirror,
+  isOpen: (target) => state.tileId === target.tileId && currentId === target.machine,
+  onLanded: (target) => { adoptedDraft = target.text || null; },
+  // Left meanwhile: what the left tile's box holds goes into its kept draft, so the next mirror there
+  // names the right text as seen.
+  onLeft: (target) => {
+    const key = `${target.machine}/${target.tileId}`;
+    drafts.set(key, { text: drafts.get(key)?.text ?? "", adopted: target.text || null });
+  },
+  onError: (message) => say(message, "error"),
+});
+
+/** A refused mirror resumes once the computer's box is empty again or holds what this box last saw:
+ *  nobody there is writing over it any more, so what is typed here goes on appearing there. */
+function resumeMirrorOnceClear() {
+  if (!mirror.refused) return;
+  if (remoteDraft && remoteDraft !== (mirror.mirrored ?? adoptedDraft)) return;
+  mirror.forget();
+  adoptedDraft = remoteDraft;
+  if (draft !== (remoteDraft ?? "")) mirror.soon();
+}
+
+/** Takes the computer's draft into this box: the text there is now what was seen, not what was last mirrored. */
+function adopt(text) {
+  adoptedDraft = text;
+  mirror.forget();
+}
+
+/** The mirror the open tile's box asks for now, captured whole so it survives the phone moving on. */
+function currentMirror() {
+  const tile = state.tile;
+  if (!tile?.composer?.syncsDraft || state.level !== "tile" || mirror.refused) return null;
+  return { tileId: tile.tileId, machine: currentId, conn: state.conn, text: draft,
+    seen: mirror.mirrored ?? adoptedDraft, unchanged: mirror.mirrored ?? remoteDraft ?? "" };
+}
+
 
 const prefs = {
   get keysHidden() { return localStorage.getItem("mtiles.keysHidden") === "1"; },
@@ -936,6 +1027,7 @@ function setDraft(text, { focus = true } = {}) {
   draft = text;
   lastDockKey = null;
   draw();
+  mirror.soon();
   const input = dock.querySelector(".draft");
   if (input && focus) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
 }
@@ -949,6 +1041,16 @@ function takeDictated(text, sendNow) {
   lastDockKey = null;
   draw();
   if (sendNow && state.tile) send(state.tile, true);
+  else mirror.soon();
+}
+
+/** How full the context is: a hairline along the dock's top edge, and the settings button turning to a
+ *  warning past 80%. Painted on every push, since the dock itself is rebuilt only when what it offers changes. */
+function paintContext(context) {
+  const tight = context >= 80;
+  dock.style.setProperty("--ctx", context != null ? `${Math.max(0, Math.min(100, context))}%` : "0%");
+  dock.classList.toggle("tight", tight);
+  dock.querySelector(".setting")?.classList.toggle("tight", tight);
 }
 
 function drawDock(tile) {
@@ -961,18 +1063,26 @@ function drawDock(tile) {
   // The computer's draft is taken into an empty box the first time it is seen; into a box holding
   // something it is offered, never pushed over what the thumb is writing.
   remoteDraft = composer.draft ?? null;
+  resumeMirrorOnceClear();
   const focused = document.activeElement?.classList?.contains("draft");
   if (remoteDraft && remoteDraft !== adoptedDraft && !draft.trim() && !focused) {
     draft = remoteDraft;
-    adoptedDraft = remoteDraft;
+    adopt(remoteDraft);
   }
   const empty = draft.trim().length === 0;
-  const offerRemote = remoteDraft && remoteDraft !== draft && remoteDraft !== adoptedDraft;
+  // What this box mirrored there comes back in every push while the thumb is ahead of it: that is our own
+  // text, not somebody else's draft to offer.
+  const offerRemote = remoteDraft && remoteDraft !== draft && remoteDraft !== adoptedDraft
+    && remoteDraft !== mirror.mirrored && remoteDraft !== mirror.inFlight;
 
   // Rebuilt only when what it offers changed: rebuilding the text box under somebody's thumb ends their
   // keyboard's composition and throws the caret to the end.
-  const dockKey = JSON.stringify([tile.tileId, composer, tile.actions, tile.newLabel, dictating, prefs.keysHidden,
-    empty, hasHistory, offerRemote]);
+  // The computer's draft is left out: every mirror comes back in it. Only a draft being offered is in the key,
+  // so the offer shows what is there now, the text "Edit here" takes.
+  const { draft: _computerDraft, ...offered } = composer;
+  const dockKey = JSON.stringify([tile.tileId, offered, tile.actions, tile.newLabel, dictating, prefs.keysHidden,
+    empty, hasHistory, offerRemote && remoteDraft]);
+  paintContext(tile.status?.contextPercent);
   if (dockKey === lastDockKey && dock.firstChild) return;
   lastDockKey = dockKey;
 
@@ -985,7 +1095,9 @@ function drawDock(tile) {
     oninput: (e) => {
       const wasEmpty = draft.trim().length === 0;
       draft = e.target.value;
+      historyAt = -1;
       grow(e.target);
+      mirror.soon();
       // What the chips offer depends on whether anything is typed.
       if (wasEmpty !== (draft.trim().length === 0)) drawDock(tile);
     },
@@ -1020,30 +1132,51 @@ function drawDock(tile) {
     onclick: () => (composer.keys && empty ? pressKey(tile, "enter") : send(tile, true)),
   }, icon(composer.keys && empty ? "enter" : "send"));
 
-  const more = hasActions || tile.newLabel || composer.keys
+  const more = hasActions || tile.newLabel || composer.keys || tile.listsConversations
     ? h("button.tool", { "aria-label": "More", onclick: () => moreSheet(tile) }, icon("more"))
     : null;
 
   // Stop is not in Send's place any more, so it needs no second tap: the desktop's Escape asks nothing.
   const stop = composer.canInterrupt
-    ? h("button.chip.stop-chip", { onclick: () => ask({ type: "interrupt", tileId: tile.tileId }) }, icon("stop"), composer.keys ? "Stop" : "Stop · Esc")
+    ? h("button.tool-btn.stop-btn", { onclick: () => ask({ type: "interrupt", tileId: tile.tileId }), "aria-label": "Stop (Esc)" },
+      icon("stop"), "Stop")
     : null;
+  // The composer's Up and Down: through what was said before, into the box to be changed and sent again.
+  const arrows = !composer.keys && hasHistory ? [
+    h("button.tool-btn", { "aria-label": "Previous message", title: "Previous message", onclick: () => stepHistory(tile, 1) }, icon("up")),
+    h("button.tool-btn", { "aria-label": "Next message", title: "Next message", onclick: () => stepHistory(tile, -1) }, icon("down")),
+  ] : [];
   const history = hasHistory
-    ? h("button.chip", { onclick: () => historySheet(tile), "aria-label": "Previous messages" }, icon("history"), "History")
+    ? h("button.tool-btn", { onclick: () => historySheet(tile), "aria-label": "Previous messages", title: "Previous messages" }, icon("history"))
+    : null;
+  const context = tile.status?.contextPercent;
+  // What the next message runs as, in one quiet button: the values joined, and the sheet behind it names
+  // them, lets each be changed and holds Compact. Three pickers side by side did not fit a phone's width.
+  const pickers = composer.pickers ?? [];
+  const settings = pickers.length || composer.canCompact
+    ? h("button.setting", {
+      class: context >= 80 ? "tight" : "",
+      onclick: () => settingsSheet(tile),
+      "aria-label": `Settings: ${pickers.map((p) => `${p.label} ${p.valueLabel ?? "not set"}`).join(", ")}`,
+    }, h("span.setting-value", pickers.map((p) => shortValue(p)).join(" · ") || "Settings"), icon("chevron"))
     : null;
   // An empty box can only read a goal out of the changes; a typed one can set it, or narrow what is read.
   const modeChips = modes.filter((m) => !empty || m.needsText !== true)
-    .map((m) => h("button.chip", { disabled: !m.enabled, onclick: () => sendMode(tile, m) }, m.label));
+    .map((m) => h("button.mode", { disabled: !m.enabled, onclick: () => sendMode(tile, m) }, m.label));
+
+  const tools = [stop, ...arrows, history].filter(Boolean);
 
   fill(dock,
     offerRemote ? h("div.remote-draft",
       h("span.remote-text", h("span.muted", "On the computer: "), remoteDraft),
-      h("button.chip", { onclick: () => { adoptedDraft = remoteDraft; setDraft(remoteDraft); } }, "Edit here")) : null,
+      h("button.mode", { onclick: () => { adopt(remoteDraft); setDraft(remoteDraft); } }, "Edit here")) : null,
     composer.keys && !prefs.keysHidden ? h("div.keys", KEYS.map(([key, label]) => h("button.key", {
       "aria-label": key, class: key === "ctrlc" || key === "escape" ? "warn" : "",
       onclick: () => pressKey(tile, key),
     }, label ?? icon(key)))) : null,
-    stop || history || modeChips.length ? h("div.dock-chips", stop, history, modeChips) : null,
+    modeChips.length ? h("div.dock-modes", modeChips) : null,
+    tools.length || settings
+      ? h("div.dock-bar", h("div.dock-tools", tools), h("div.dock-settings", settings)) : null,
     h("div.dock-row", more, input, mic, primary));
   grow(input);
   if (focused) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
@@ -1083,7 +1216,7 @@ function historyFor(tile) {
 
 function historySheet(tile) {
   const el = sheet(
-    h("p.sheet-title", "Previous messages — tap one to edit it and send it again"),
+    h("p.sheet-title", "Previous messages"),
     h("div.history", historyFor(tile).map((text) => h("button.history-item", {
       onclick: () => { el.remove(); setDraft(text); },
     }, text))));
@@ -1098,9 +1231,79 @@ function moreSheet(tile) {
       onclick: async () => { el.remove(); if (await ask({ type: "action", tileId: tile.tileId, id: a.id })) say(`${a.label}: started.`); },
     }, a.label)),
     tile.newLabel ? h("button", { onclick: () => { el.remove(); startOver(tile); } }, tile.newLabel) : null,
+    tile.listsConversations
+      ? h("button", { onclick: () => { el.remove(); conversationsSheet(tile); } }, "Other conversations…") : null,
     composer.keys ? h("button.quiet", {
       onclick: () => { el.remove(); prefs.keysHidden = !prefs.keysHidden; lastDockKey = null; draw(); },
     }, prefs.keysHidden ? "Show the keys" : "Hide the keys") : null);
+}
+
+function stepHistory(tile, by) {
+  const list = historyFor(tile);
+  if (historyAt === -1) historyStash = draft;
+  historyAt = Math.max(-1, Math.min(list.length - 1, historyAt + by));
+  const at = historyAt;
+  setDraft(at === -1 ? historyStash : list[at], { focus: false });
+  historyAt = at;
+}
+
+/** A model id is the part a person reads by: its provider and its family prefix go. */
+function shortValue(picker) {
+  const value = picker.valueLabel ?? "—";
+  return picker.id === "model" ? value.replace(/^.*\//, "").replace(/^claude-/, "") : value;
+}
+
+/** Model, mode and effort, one section each, and Compact under them: what the next message runs as. */
+function settingsSheet(tile) {
+  const composer = tile.composer;
+  const context = tile.status?.contextPercent;
+  const el = sheet(
+    (composer.pickers ?? []).map((p) => h("button.setting-row", { onclick: () => { el.remove(); pickerSheet(tile, p); } },
+      h("span.setting-label", p.label), h("span.setting-now", p.valueLabel ?? "not set"), icon("chevron"))),
+    composer.canCompact ? h("button.setting-row", { onclick: () => { el.remove(); compactNow(tile); } },
+      h("span.setting-label", "Context"),
+      h("span.setting-now", { class: context >= 80 ? "tight" : "" }, context != null ? `${Math.round(context)}% used` : "not known"),
+      h("span.setting-act", "Compact")) : null);
+}
+
+/** The composer's model, mode or effort: one list to choose from, and a name typed by hand for a model. */
+function pickerSheet(tile, picker) {
+  const choose = async (choice) => {
+    if (choice.warning && !confirm(choice.warning)) return;
+    el.remove();
+    if (await ask({ type: "pick", tileId: tile.tileId, picker: picker.id, value: choice.id })) say(`${picker.label}: ${choice.label}`);
+  };
+  const typed = picker.custom ? h("input.q-custom", {
+    type: "text", placeholder: `Or type a ${picker.label.toLowerCase()} name`, autocomplete: "off", spellcheck: false,
+    enterKeyHint: "done",
+    onkeydown: (e) => { if (e.key === "Enter" && e.target.value.trim()) choose({ id: e.target.value.trim(), label: e.target.value.trim() }); },
+  }) : null;
+  const el = sheet(
+    h("p.sheet-title", picker.label),
+    typed,
+    h("div.history", picker.choices.map((c) => h("button.history-item", {
+      class: c.id === picker.value ? "current" : "", onclick: () => choose(c),
+    }, c.label))));
+}
+
+async function compactNow(tile) {
+  if (!confirm("Compact the context? The agent summarises what has been said so far and carries on from the summary. The transcript is not touched.")) return;
+  if (await ask({ type: "compact", tileId: tile.tileId })) say("Compacting the context.");
+}
+
+async function conversationsSheet(tile) {
+  const answer = await ask({ type: "conversations", tileId: tile.tileId });
+  if (!answer || state.tileId !== tile.tileId) return;
+  const el = sheet(
+    h("p.sheet-title", "Conversations in this workspace"),
+    h("div.history", answer.conversations.map((c) => h("button.history-item.conversation", {
+      class: c.current ? "current" : "", disabled: !!c.reason, title: c.reason ?? "",
+      onclick: async () => {
+        if (c.current) { el.remove(); return; }
+        el.remove();
+        if (await ask({ type: "openConversation", tileId: tile.tileId, conversationId: c.id })) say("Opening the conversation.");
+      },
+    }, h("span.conv-title", c.title), h("span.conv-note", c.reason ?? c.note)))));
 }
 
 async function startOver(tile) {
@@ -1124,12 +1327,13 @@ async function sendMode(tile, mode) {
   if (mode.needsText && !text) { say("Type the goal first.", "error"); return; }
   const { ok, discard } = consentToStartOver(tile);
   if (!ok || state.sending) return;
+  mirror.cancel();
   state.sending = true;
-  const answer = await ask({ type: "send", tileId: tile.tileId, text, submit: true, mode: mode.id, replaces: adoptedDraft, discard });
+  const answer = await ask({ type: "send", tileId: tile.tileId, text, submit: true, mode: mode.id, replaces: mirror.holding(adoptedDraft), discard });
   state.sending = false;
   // A detect keeps the words on the computer until a goal is read out of them, so the next push carries
   // them back: they were sent, and are not a draft to take into the box again.
-  if (answer) { draft = ""; adoptedDraft = text || remoteDraft; scrollToEnd(true); }
+  if (answer) { draft = ""; adoptedDraft = text || remoteDraft; mirror.forget(); historyAt = -1; scrollToEnd(true); }
   lastDockKey = null;
   draw();
 }
@@ -1144,10 +1348,12 @@ async function send(tile, submit) {
   if (!text || state.sending) return;
   const { ok, discard } = submit ? consentToStartOver(tile) : { ok: true, discard: false };
   if (!ok) return;
+  // A mirror still waiting would land after the send and put the sent words back into the computer's box.
+  mirror.cancel();
   state.sending = true;
-  const answer = await ask({ type: "send", tileId: tile.tileId, text, submit, replaces: adoptedDraft, discard });
+  const answer = await ask({ type: "send", tileId: tile.tileId, text, submit, replaces: mirror.holding(adoptedDraft), discard });
   state.sending = false;
-  if (answer) { draft = ""; adoptedDraft = remoteDraft; scrollToEnd(true); }
+  if (answer) { draft = ""; adoptedDraft = remoteDraft; mirror.forget(); historyAt = -1; scrollToEnd(true); }
   lastDockKey = null;
   draw();
 }
@@ -1180,7 +1386,10 @@ function say(message, tone = "info") {
   toastTimer = setTimeout(() => toast.classList.remove("shown"), tone === "error" ? 6000 : 3500);
 }
 
-addEventListener("resize", () => { if (state.level === "layout") draw(); });
+addEventListener("resize", () => {
+  if (state.level === "layout") draw();
+  if (state.level === "tile") fitScreen(view.querySelector(".screen"));
+});
 
 // The cards' "3m" moves with the clock, not only with pushes.
 setInterval(() => { if (state.level === "layout" && !document.hidden) draw(); }, 30_000);

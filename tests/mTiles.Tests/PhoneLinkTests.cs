@@ -363,11 +363,11 @@ public sealed class PhoneLinkTests : IAsyncLifetime
                 Composer: new RemoteComposer(true, "Message"));
         }
 
-        public Task<string?> HandleRemoteAsync(RemoteTileCommand command)
+        public Task<RemoteRefusal?> HandleRemoteAsync(RemoteTileCommand command)
         {
-            if (command is RemoteInterrupt) return Task.FromResult<string?>("Nothing to stop.");
+            if (command is RemoteInterrupt) return Task.FromResult<RemoteRefusal?>("Nothing to stop.");
             ReceivedQueue.Enqueue(command);
-            return Task.FromResult<string?>(null);
+            return Task.FromResult<RemoteRefusal?>(null);
         }
 
         public IReadOnlyList<TileAction> Actions =>
