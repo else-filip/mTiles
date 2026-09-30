@@ -6,11 +6,11 @@ namespace mTiles.Tests;
 
 /// <summary>
 /// Which of the Goal tile's strip parts give way first as it narrows, and how the status bar under the
-/// composer does.
+/// strip does.
 /// </summary>
 /// <remarks>
 /// The strip retreats in its own order: mode and effort, then the agent. The status lives in the bar
-/// under the composer and trims before it goes to its dot. What the status says is
+/// under the strip and trims before it goes to its dot. What the status says is
 /// <see cref="GoalStatusTests"/>.
 /// </remarks>
 public class GoalStripLayoutTests

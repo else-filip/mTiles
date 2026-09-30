@@ -44,7 +44,7 @@ public partial class GoalTileView : UserControl, IFocusTargetView
         // handlers it hangs on these controls, which is exactly as long as it is needed.
         new RowFitter(StripRow, GoalStripLayout.Steps,
             ExecutionAgentPicker, PermissionModePicker, EffortPicker);
-        // The status bar under the composer has its own order - see GoalStatusBarLayout.
+        // The status bar under the strip has its own order - see GoalStatusBarLayout.
         new RowFitter(StatusRow, GoalStatusBarLayout.Steps, StatusView, Badges)
             .Watch(StatusView, StripStatus.TextProperty)
             .Watch(Badges, BoundsProperty);
