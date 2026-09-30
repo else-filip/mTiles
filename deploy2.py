@@ -24,6 +24,11 @@ def run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
 
 
 def main() -> None:
+    # CI pushes a commit of its own after every release (arch-repo.yml renders the PKGBUILD), so the
+    # local master is one behind by the next deploy. Without this the push below was refused, the
+    # script stopped before tagging, and releases went missing with nothing on GitHub saying why.
+    run(["git", "pull", "--rebase"])
+
     version_file = ROOT / "version.txt"
     version = version_file.read_text().strip()
     major, minor, patch = version.split(".")
