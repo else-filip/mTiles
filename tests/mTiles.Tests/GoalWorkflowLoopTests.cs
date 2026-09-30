@@ -2370,6 +2370,29 @@ public class GoalWorkflowLoopTests : GoalTileFixture
     }
 
     [Fact]
+    public void A_new_goal_over_a_running_tile_stops_the_run_and_starts_fresh()
+    {
+        Ui.Run(async () =>
+        {
+            GoalTileViewModel.AiRunnerFactory = (_, _, _, token) =>
+                Task.Delay(Timeout.Infinite, token).ContinueWith<AiOutput>(_ => NoMoreQuestions, token);
+
+            using var vm = NewTile();
+            vm.InputText = "a goal";
+            var running = vm.SubmitCommand.ExecuteAsync(null);
+            Assert.True(vm.IsRunning);
+
+            await vm.StartNewConversationAsync();
+            await running;
+
+            Assert.False(vm.IsRunning);
+            Assert.False(vm.IsPaused);
+            Assert.DoesNotContain(vm.Messages, m => m.Text.Contains("a goal"));
+            Assert.DoesNotContain(vm.Messages, m => m.Text.Contains("Pause the run"));
+        });
+    }
+
+    [Fact]
     public void A_new_goal_with_no_dialog_to_ask_in_keeps_the_current_one()
     {
         Ui.Run(async () =>

@@ -5119,6 +5119,8 @@ public partial class GoalTileViewModel
     /// </summary>
     private async Task WorkingAsync(Func<Task> work)
     {
+        var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _working = finished.Task;
         IsRunning = true;
         StartElapsed();
         _cts?.Dispose();
@@ -5143,8 +5145,13 @@ public partial class GoalTileViewModel
 
             _cts?.Dispose();
             _cts = null;
+            finished.TrySetResult();
         }
     }
+
+    /// <summary>The workflow <see cref="WorkingAsync"/> is carrying, finished once it has unwound —
+    /// which after a cancellation takes as long as the tool takes to die.</summary>
+    private Task _working = Task.CompletedTask;
 
     /// <summary>
     /// Which stage the run is in, in the two or three words the waiting row has room for.
@@ -5747,19 +5754,22 @@ public partial class GoalTileViewModel
     /// buttons, a misclick away from Restart and Close.</remarks>
     public async Task StartNewConversationAsync()
     {
-        if (IsRunning)
-        {
-            await SayOnceAsync("Pause the run before starting a new goal.");
-            return;
-        }
-
-        if (!await ConfirmDiscardAsync(askWhenNothingToLose: true))
+        if (!await ConfirmDiscardAsync(askWhenNothingToLose: true, stopsTheRun: IsRunning))
         {
             // The same explanation Submit gives, for the one case where nobody was asked at all.
             if (ConfirmAction == null)
                 await SayOnceAsync("This tile cannot ask whether to discard the current goal, so it " +
                                    "has kept it.");
             return;
+        }
+
+        // A run still going is stopped first and waited out: the old goal's loop must not go on writing
+        // into the transcript, the engine or the file of the new one. Paused rather than just cancelled,
+        // for the reason Dispose gives — and StartNewGoal clears the pause again.
+        if (IsRunning)
+        {
+            Pause();
+            await _working;
         }
 
         // Only over a file that already exists. Clicking + on a tile nobody has used yet otherwise
@@ -6102,7 +6112,9 @@ public partial class GoalTileViewModel
     /// </summary>
     /// <param name="askWhenNothingToLose">Ask even over an empty tile, where there is a dialog to ask in —
     /// the header button's case, a misclick away from Restart and Close.</param>
-    private async Task<bool> ConfirmDiscardAsync(bool askWhenNothingToLose = false)
+    /// <param name="stopsTheRun">A run is in flight and saying yes stops it — always asked, since the
+    /// tool's answer in progress is lost even where the transcript holds nothing yet.</param>
+    private async Task<bool> ConfirmDiscardAsync(bool askWhenNothingToLose = false, bool stopsTheRun = false)
     {
         // What is worth a dialog is what would be lost, not which phase the tile is in. Asking about
         // the phase meant that a Clarify which failed — and so put the engine back to Goal — let the
@@ -6115,12 +6127,15 @@ public partial class GoalTileViewModel
             return true;
         }
 
-        var worthConfirming = GoalTilePolicy.WorthConfirming(Messages);
+        var worthConfirming = stopsTheRun || GoalTilePolicy.WorthConfirming(Messages);
         if (!worthConfirming && (!askWhenNothingToLose || ConfirmAction == null)) return true;
 
         // No dialog to ask in means no. The same answer the Settings dialog gives, and for the same
         // reason: an unanswered question is not a yes, and there is no undo for a discarded session.
         if (ConfirmAction == null) return false;
+
+        if (stopsTheRun)
+            return await ConfirmAction("Stop the run, discard the current goal and start fresh?");
 
         return await ConfirmAction(worthConfirming
             ? "Discard the current goal and start fresh?"

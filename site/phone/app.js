@@ -1427,6 +1427,7 @@ async function startOver(tile) {
   const what = tile.newLabel;
   const question = tile.kind === "goal"
     ? `${what}? The current goal and its transcript are discarded.`
+      + (tile.composer.canInterrupt ? " The run is going, and this stops it." : "")
     : `${what}? This one stays in the list of conversations on the computer.`
       + (tile.composer.canInterrupt ? " The agent is working, and this stops what it is doing." : "");
   if (!confirm(question)) return;

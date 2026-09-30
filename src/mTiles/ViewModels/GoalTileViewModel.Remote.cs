@@ -216,7 +216,8 @@ public partial class GoalTileViewModel
                 return null;
 
             case RemoteNewConversation:
-                if (IsRunning) return "The goal is running. Pause it first.";
+                // A run in flight is stopped and waited out by StartNewConversationAsync itself, as on
+                // the computer; the phone has already said so when it asked.
                 StartAnswered(true, StartNewConversationAsync);
                 return null;
 
