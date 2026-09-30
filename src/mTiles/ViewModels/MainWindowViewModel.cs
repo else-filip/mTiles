@@ -395,7 +395,7 @@ public partial class MainWindowViewModel : ObservableObject
             var accepted = await confirm($"Version {_updateService.NewVersion} is ready. Restart now to update?");
             if (!accepted) return;
         }
-        _updateService.ApplyUpdate();
+        await Task.Run(_updateService.ApplyUpdate);   // may wait out a download in progress
     }
 
     public event Action<string>? WorkspaceRemoved;
