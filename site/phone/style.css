@@ -336,7 +336,64 @@ ol.plan li.step-done::before { content: "● "; color: var(--ok); }
   color: var(--text);
 }
 
+.screen.full-size { white-space: pre; overflow-x: auto; overflow-wrap: normal; font-size: 11.5px; }
+
 .actions-only { display: grid; gap: 8px; padding-top: 8px; }
+
+/* A way back to the end, over the bottom of the conversation while the reader is further up. */
+.to-end {
+  position: fixed; right: 14px; bottom: calc(env(safe-area-inset-bottom) + 190px); z-index: 3;
+  width: 40px; height: 40px; min-height: 0; padding: 0; border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--raised); border: 1px solid var(--edge); color: var(--strong);
+  box-shadow: 0 4px 14px rgb(0 0 0 / .35);
+}
+.to-end[hidden] { display: none; }
+
+/* ── list: rows with a tick, a mark and a switch ── */
+
+.list-section { display: grid; gap: 4px; }
+.list-section + .list-section { margin-top: 12px; }
+.list-head { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 2px; }
+.list-title { font-size: var(--fs-xs); color: var(--muted); }
+.list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.list-empty { margin: 0; padding: 6px 2px 10px; font-size: var(--fs-sm); color: var(--muted); }
+.list-row { display: flex; align-items: center; gap: 4px; border-radius: 8px; }
+.list-row.selected { background: var(--raised); box-shadow: inset 3px 0 0 var(--accent); }
+.tick {
+  flex: none; width: 40px; min-height: 44px; padding: 0; display: grid; place-items: center;
+  background: none; border: 0; color: transparent;
+}
+.tick .icon { width: 16px; height: 16px; box-sizing: content-box; padding: 2px; border: 1.5px solid var(--edge); border-radius: 5px; }
+.tick.on { color: var(--accent-ink); }
+.tick.on .icon { background: var(--accent); border-color: var(--accent); }
+.row-main {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; text-align: left;
+  background: none; border: 0; padding: 8px 6px; min-height: 44px;
+}
+.badge { flex: none; width: 1.6em; text-align: center; font-size: var(--fs-xs); font-weight: 700; color: var(--warn); }
+.badge[data-status="A"], .badge[data-status="?"] { color: var(--ok); }
+.badge[data-status="D"] { color: var(--danger); }
+.row-text { min-width: 0; display: flex; flex-direction: column; }
+.row-name { color: var(--strong); overflow-wrap: anywhere; font-size: var(--fs-sm); }
+.row-note { color: var(--muted); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.switch {
+  flex: none; display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 10px;
+  background: none; border: 0; color: var(--muted); font-size: var(--fs-xs);
+}
+.switch-track { width: 34px; height: 20px; border-radius: 10px; background: var(--edge); position: relative; transition: background .15s; }
+.switch-knob { position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--text); transition: transform .15s; }
+.switch.on { color: var(--warn); }
+.switch.on .switch-track { background: color-mix(in srgb, var(--warn) 70%, var(--edge)); }
+.switch.on .switch-knob { transform: translateX(14px); background: var(--strong); }
+
+.detail { display: grid; gap: 6px; margin-top: 14px; }
+.detail-title { margin: 0; font-size: var(--fs-xs); color: var(--muted); overflow-wrap: anywhere; }
+.detail-text {
+  margin: 0 -4px; padding: 10px 12px; border-radius: var(--radius); background: var(--surface);
+  font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text);
+}
+.dock-row.only-more { justify-content: flex-start; }
 
 /* ── dock ───────────────────────────────────────────────────────────────────────
    One slab under the conversation, in the order a thumb reaches for things: what the tile offers besides

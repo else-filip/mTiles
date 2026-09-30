@@ -47,7 +47,7 @@ public interface IRemoteConversationsTile : ITile
 /// Tile content that can say, in a line, what it is doing — for its card in a phone's miniature of the
 /// layout, so a workspace can be read without zooming into every tile.
 /// </summary>
-/// <remarks>Separate from <see cref="IRemoteViewTile"/> because a tile the phone cannot zoom into (git)
+/// <remarks>Separate from <see cref="IRemoteViewTile"/> because a tile the phone draws only as a card
 /// still has something worth a line. Asked on the UI thread about once a second while a phone looks at
 /// the layout, so it must be cheap: never a description of the whole conversation.</remarks>
 public interface IRemotePreviewTile : ITile

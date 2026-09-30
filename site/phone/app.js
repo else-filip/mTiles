@@ -326,6 +326,7 @@ function go(level, { machineId, workspaceId, tileId, from } = {}, push = true) {
   zoom(origin, depth(level) > depth(before));
   watch();
   holdScreenOn();
+  moreBelow(false);
 
   // An answer is kept only if the page is still looking at what it asked about, on the same computer —
   // the same test a push passes.
@@ -741,7 +742,7 @@ function drawTile() {
 
   // Unchanged since it was drawn — a push about something else — so nothing under the finger moves: a
   // half-typed answer keeps its focus and its keyboard.
-  const key = JSON.stringify([tile.status, tile.chat, tile.screen, tile.view, state.answerChips]);
+  const key = JSON.stringify([tile.status, tile.chat, tile.screen, tile.list, tile.view, state.answerChips, prefs.screenScroll]);
   if (key !== lastTileKey || !view.querySelector(".tile-body")) {
     lastTileKey = key;
     drawTileBody(tile);
@@ -754,9 +755,15 @@ let lastTileKey = null;
 function drawTileBody(tile) {
   const status = tile.status;
   const atEnd = isAtEnd();
+  // A terminal is redrawn in place while it streams: a new element each push threw away where the reader
+  // had scrolled to — sideways at full size, and back to the end whenever they had scrolled up to read.
+  if (tile.view === "terminal" && updateScreenInPlace(tile, atEnd)) return;
   const body = h("div.tile-body",
-    status?.text ? h("p.tile-status", { class: status.activity }, status.text) : null,
-    tile.view === "chat" ? chatView(tile) : tile.view === "terminal" ? screenView(tile) : actionsOnlyView(tile));
+    h("p.tile-status", { class: status?.activity ?? "", hidden: !status?.text }, status?.text ?? ""),
+    tile.view === "chat" ? chatView(tile)
+      : tile.view === "terminal" ? screenView(tile)
+        : tile.view === "list" ? listView(tile)
+          : actionsOnlyView(tile));
   if (view.firstChild?.classList?.contains("tile-body") && view.firstChild.dataset.tile === tile.tileId) {
     view.firstChild.replaceWith(body);
   } else {
@@ -765,6 +772,103 @@ function drawTileBody(tile) {
   body.dataset.tile = tile.tileId;
   fitScreen(body.querySelector(".screen"));
   scrollToEnd(atEnd);
+  if (!atEnd) moreBelow(true);
+  revealOpenedDetail(tile);
+}
+
+/** The screen's text and status, changed where they stand. False when there is nothing to change yet. */
+function updateScreenInPlace(tile, atEnd) {
+  const body = view.firstChild;
+  const pre = body?.dataset?.tile === tile.tileId ? body.querySelector(".screen") : null;
+  if (!pre) return false;
+  const status = body.querySelector(".tile-status");
+  if (status) {
+    status.textContent = tile.status?.text ?? "";
+    status.hidden = !tile.status?.text;
+    status.className = `tile-status ${tile.status?.activity ?? ""}`;
+  }
+  const left = pre.scrollLeft;
+  pre.dataset.lines = JSON.stringify(tile.screen?.lines ?? []);
+  fitScreen(pre);
+  pre.scrollLeft = left;
+  if (atEnd) scrollToEnd(true);
+  else moreBelow(true);
+  return true;
+}
+
+// Scrolled up to read while the tile goes on writing: a way back to the end, rather than being pulled
+// there — the rule a chat or a terminal keeps on the computer too.
+const toEnd = h("button.to-end", {
+  "aria-label": "Jump to the latest", hidden: true,
+  onclick: () => { scrollToEnd(true); moreBelow(false); },
+}, icon("down"));
+root.append(toEnd);
+function moreBelow(show) { toEnd.hidden = !show || state.level !== "tile"; }
+view.addEventListener("scroll", () => { if (isAtEnd()) moreBelow(false); }, { passive: true });
+
+// ── list: a git tile's changed files, a database tile's databases ─────────────────────────────
+
+let openedDetail = null;    // the row whose detail the reader asked for, to bring into view when it comes
+
+function listView(tile) {
+  const list = tile.list ?? { sections: [] };
+  return [
+    list.sections.map((section) => h("section.list-section",
+      h("div.list-head",
+        section.checkAll != null ? h("button.tick", {
+          class: section.checkAll ? "on" : "", "aria-label": section.checkAll ? "Untick all" : "Tick all",
+          onclick: () => itemAct(tile, "*", "check"),
+        }, icon("check")) : null,
+        h("span.list-title", section.title)),
+      section.items.length
+        ? h("ul.list", section.items.map((item) => listRow(tile, item)))
+        : h("p.list-empty", section.empty ?? ""))),
+    list.detail ? detailView(list.detail) : null,
+  ];
+}
+
+function listRow(tile, item) {
+  const tick = item.checked != null ? h("button.tick", {
+    class: item.checked ? "on" : "", "aria-label": `${item.checked ? "Untick" : "Tick"} ${item.text}`,
+    onclick: () => itemAct(tile, item.id, "check"),
+  }, icon("check")) : null;
+  const main = h("button.row-main", {
+    onclick: () => {
+      // Only opening a row happens on a tap of the row: a tick can be a grant, and taking one away is left to
+      // the tick itself, never to a stray tap while scrolling.
+      if (item.selectable) { openedDetail = item.id; itemAct(tile, item.id, "select"); }
+    },
+  },
+    item.badge ? h("span.badge", { dataset: { status: item.badge } }, item.badge) : null,
+    h("span.row-text", h("span.row-name", item.text), item.note ? h("span.row-note", item.note) : null));
+  const toggle = item.switch ? h("button.switch", {
+    role: "switch", "aria-checked": String(item.switch.on), class: item.switch.on ? "on" : "",
+    "aria-label": `${item.switch.label}: ${item.switch.on ? "on" : "off"}`,
+    onclick: () => {
+      if (!item.switch.on && item.switch.warning && !confirm(item.switch.warning)) return;
+      itemAct(tile, item.id, "switch");
+    },
+  }, h("span.switch-label", item.switch.label), h("span.switch-track", h("span.switch-knob"))) : null;
+  return h("li.list-row", { class: item.selected ? "selected" : "" }, tick, main, toggle);
+}
+
+function detailView(detail) {
+  // Drawn as a code block through markdown.js, so a diff here is coloured by the one rule a chat's is.
+  const code = render([{ type: "code", lang: detail.kind === "diff" ? "diff" : "", text: detail.text }]);
+  code.firstChild.classList.add("detail-text");
+  return h("section.detail", h("p.detail-title", detail.title), code);
+}
+
+function revealOpenedDetail(tile) {
+  const selected = tile.list?.sections?.flatMap((s) => s.items).find((i) => i.selected);
+  if (!openedDetail || selected?.id !== openedDetail || !tile.list?.detail) return;
+  openedDetail = null;
+  requestAnimationFrame(() => view.querySelector(".detail")?.scrollIntoView({ block: "start", behavior: "smooth" }));
+}
+
+async function itemAct(tile, itemId, act) {
+  navigator.vibrate?.(8);
+  await ask({ type: "item", tileId: tile.tileId, itemId, act });
 }
 
 function isAtEnd() {
@@ -908,6 +1012,12 @@ function screenView(tile) {
 function fitScreen(pre) {
   if (!pre?.isConnected) return;
   const lines = JSON.parse(pre.dataset.lines ?? "[]").map((l) => l.replace(/\s+$/, ""));
+  pre.classList.toggle("full-size", prefs.screenScroll);
+  if (prefs.screenScroll) {
+    pre.style.fontSize = "";
+    pre.textContent = lines.join("\n");
+    return;
+  }
   const style = getComputedStyle(pre);
   const room = pre.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
   const perPx = charWidth(style.fontFamily);
@@ -1014,6 +1124,8 @@ function currentMirror() {
 
 const prefs = {
   get keysHidden() { return localStorage.getItem("mtiles.keysHidden") === "1"; },
+  get screenScroll() { return localStorage.getItem("mtiles.screenScroll") === "1"; },
+  set screenScroll(v) { localStorage.setItem("mtiles.screenScroll", v ? "1" : "0"); },
   set keysHidden(v) { localStorage.setItem("mtiles.keysHidden", v ? "1" : "0"); },
 };
 
@@ -1177,7 +1289,9 @@ function drawDock(tile) {
     modeChips.length ? h("div.dock-modes", modeChips) : null,
     tools.length || settings
       ? h("div.dock-bar", h("div.dock-tools", tools), h("div.dock-settings", settings)) : null,
-    h("div.dock-row", more, input, mic, primary));
+    composer.enabled || composer.placeholder
+      ? h("div.dock-row", more, input, mic, primary)
+      : more ? h("div.dock-row.only-more", more) : null);
   grow(input);
   if (focused) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
 }
@@ -1233,6 +1347,9 @@ function moreSheet(tile) {
     tile.newLabel ? h("button", { onclick: () => { el.remove(); startOver(tile); } }, tile.newLabel) : null,
     tile.listsConversations
       ? h("button", { onclick: () => { el.remove(); conversationsSheet(tile); } }, "Other conversations…") : null,
+    tile.view === "terminal" ? h("button.quiet", {
+      onclick: () => { el.remove(); prefs.screenScroll = !prefs.screenScroll; lastTileKey = null; draw(); },
+    }, prefs.screenScroll ? "Fit the screen to the width" : "Show the screen at full size") : null,
     composer.keys ? h("button.quiet", {
       onclick: () => { el.remove(); prefs.keysHidden = !prefs.keysHidden; lastDockKey = null; draw(); },
     }, prefs.keysHidden ? "Show the keys" : "Hide the keys") : null);

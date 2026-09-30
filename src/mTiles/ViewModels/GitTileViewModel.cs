@@ -398,6 +398,7 @@ public partial class GitTileViewModel : ObservableObject, ITileActions, IRemoteP
     private async Task LoadDiffForSelectedAsync()
     {
         var change = SelectedChange;
+        DiffFilePath = null;
         if (change == null)
         {
             DiffText = "";
@@ -410,22 +411,28 @@ public partial class GitTileViewModel : ObservableObject, ITileActions, IRemoteP
         {
             var result = await _gitService.GetDiffAsync(change);
             DiffText = FormatDiff(result.DiffText);
+            DiffFilePath = change.FilePath;
             OldContent = result.OldContent;
             NewContent = result.NewContent;
         }
         catch (Exception ex)
         {
             DiffText = $"Error loading diff: {ex.Message}";
+            DiffFilePath = change.FilePath;
             OldContent = "";
             NewContent = "";
         }
     }
 
     [RelayCommand(CanExecute = nameof(CanCommit))]
-    private async Task CommitAsync()
+    private Task CommitAsync() => CommitCheckedAsync();
+
+    /// <summary>Commits the ticked files; answers why it did not, or null once it has.</summary>
+    private async Task<string?> CommitCheckedAsync()
     {
         var checkedFiles = Changes.Where(c => c.IsChecked).Select(c => c.FilePath).ToList();
-        if (checkedFiles.Count == 0 || string.IsNullOrWhiteSpace(CommitMessage)) return;
+        if (checkedFiles.Count == 0) return "Tick the files to commit first.";
+        if (string.IsNullOrWhiteSpace(CommitMessage)) return "Write a commit message first.";
 
         IsLoading = true;
         try
@@ -439,10 +446,12 @@ public partial class GitTileViewModel : ObservableObject, ITileActions, IRemoteP
             CommitMessage = "";
             CommitDescription = "";
             await RefreshAsync();
+            return null;
         }
         catch (Exception ex)
         {
             Trace.TraceWarning("GitTile commit failed: {0}", ex.Message);
+            return $"The commit failed: {ex.Message}";
         }
         finally
         {
@@ -645,6 +654,7 @@ public partial class GitTileViewModel : ObservableObject, ITileActions, IRemoteP
     private async Task LoadCommitDiffAsync()
     {
         var commit = SelectedCommit;
+        DiffFilePath = null;
         if (commit == null)
         {
             DiffText = "";

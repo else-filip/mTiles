@@ -793,10 +793,18 @@ presses, because the tile already does: the id is checked against what it offers
 The eighth capability interface, and the same bargain as the other seven: a kind that implements it says
 what it shows on a phone (`DescribeForRemote` → `RemoteTileBody`: a chat, a screen, a status line and a
 composer) and answers what a phone asks of it (`HandleRemoteAsync` → null, or the sentence the phone
-shows). The bridge never learns which kinds exist. Three implement it — the Agent tile (its own
+shows). The bridge never learns which kinds exist. Five implement it — the Agent tile (its own
 `ConversationState`, projected by `AgentChatProjection`), the Goal tile (`GoalTileViewModel.Remote.cs`,
 through the very commands its buttons run) and the terminal, whose screen is read as text off the control
-(`TerminalControl.ReadScreenText`). A kind that implements nothing is still drawn in the phone's
+(`TerminalControl.ReadScreenText`) — and two tiles made of rows, drawn as the view `list`
+(`RemoteList` of `RemoteListSection`s of `RemoteListItem`s, each with an optional tick, badge and
+switch, and a `RemoteDetail` under the list for the row opened): the git tile
+(`GitTileViewModel.Remote.cs` — the changed files, the diff of the opened one cut at `RemoteDiffLimit`
+and shown only once the diff on hand is that file's own, and the commit message as the composer) and the
+database tile (`DatabaseTileViewModel.Remote.cs` — the databases granted to this workspace's agents with
+their Write switch, whose warning the phone asks before it goes on, and the ones found to add). A row is
+acted on by the wire request `{"type":"item","tileId","itemId","act"}`, `act` one of `check` (`*` for
+every row), `select` or `switch` — `RemoteItem`. A kind that implements nothing is still drawn in the phone's
 miniature of the layout — a layout with holes in it is not recognisable — and can be zoomed into if it
 takes text (`ITextInputTile`) or offers a phone an action; otherwise it is drawn dimmed
 (`PhoneTiles.IsReachable`, the one rule for both).

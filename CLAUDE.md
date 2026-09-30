@@ -409,7 +409,7 @@ an Enter land), `ICustomBackgroundTile` (the terminal's inset and its own backgr
 it started, which is what the workspace row's memory reading is measured from), `IDescribedTile` (what
 the tile is *running*, beside its name in the header — an agent tile of either kind answers with its instance and model,
 and a kind with nothing to add simply does not implement it), `IRemoteViewTile` (what a paired phone
-shows when it zooms into the tile, and what the phone may ask of it — the Agent, Goal and terminal tiles). **One class
+shows when it zooms into the tile, and what the phone may ask of it — the Agent, Goal, terminal, git and database tiles). **One class
 per kind** — `Services/Tiles/*TileKind.cs` — says what it is called, what it looks like, how it is built
 from saved state and what it writes down; **one line per kind** in `App.BuildTileCatalog` registers it
 together with the view that draws it, and `LeafTileView` resolves that view by a dictionary lookup on
@@ -1785,6 +1785,16 @@ What is worth knowing before touching `Services/Phone/` or `site/phone/`:
   as the composer's own arrows do. A terminal's screen is **fitted to the phone's width** — the type
   shrinks to the widest line down to a readable size and wraps past it, and a rule across the terminal
   is cut to the width — because a sideways scroll reads every line in two halves.
+  The screen is **redrawn in place** while it streams, so where the reader scrolled to — down the page, or
+  sideways with *Show the screen at full size* on — survives every push, and a way back to the end
+  appears instead of the page pulling them there. t3code runs a real emulator on a canvas and resizes the
+  PTY to the viewport; that is not open to us, because the terminal is the desktop's and keeps its size.
+- **A tile made of rows is a list** (`RemoteList`, view `list`, `RemoteItem` — `check`, `select`,
+  `switch`): the **git** tile's changed files with their ticks, the diff of the one opened (cut at
+  `RemoteDiffLimit`) and the commit message as its composer, mirrored like any other draft; the **database**
+  tile's databases this workspace's agents may query, each with its Write switch — asked on the phone
+  before it goes on, since it is a grant to an agent — and the ones found on the network to add. Discard
+  and Undo stay on the computer.
 - **One phone, several computers, all connected at once** (`site/phone/app.js` → *computers*): each
   paired mTiles has its own link and its own picture of its workspaces, so the Computers list says which
   one is waiting for you, a header mark says so from inside another, and switching is instant. The

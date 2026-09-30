@@ -62,7 +62,8 @@ internal static class PhoneTiles
             body.Composer ?? RemoteComposer.None,
             [.. PhoneTileActions.ForPhone(leaf.Actions).Select(a => new RemoteAction(a.Id, a.Label, a.Icon, a.IsEnabled))],
             body.NewLabel,
-            ListsConversations: leaf.Content is IRemoteConversationsTile);
+            ListsConversations: leaf.Content is IRemoteConversationsTile,
+            List: body.List);
     }
 
     /// <summary>

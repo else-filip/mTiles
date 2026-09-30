@@ -143,6 +143,9 @@ public sealed class PhoneProtocolTests
             Assert.IsType<TileCommandRequest>(Parse("""{"type":"openConversation","tileId":"t","conversationId":"c"}""")).Command);
         Assert.Equal(new ConversationsRequest("t"), Parse("""{"type":"conversations","tileId":"t"}"""));
         Assert.Null(Parse("""{"type":"pick","tileId":"t","picker":"mode"}"""));
+        Assert.Equal(new RemoteItem("a.cs", "check"),
+            Assert.IsType<TileCommandRequest>(Parse("""{"type":"item","tileId":"t","itemId":"a.cs","act":"check"}""")).Command);
+        Assert.Null(Parse("""{"type":"item","tileId":"t","itemId":"a.cs","act":"delete"}"""));
     }
 
     [Fact]

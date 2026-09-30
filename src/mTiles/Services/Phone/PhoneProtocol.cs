@@ -136,6 +136,9 @@ internal static class PhoneProtocol
                 "compact" when S("tileId") is { Length: > 0 } t => new TileCommandRequest(t, new RemoteCompact()),
                 "openConversation" when S("tileId") is { Length: > 0 } t && S("conversationId") is { Length: > 0 } c =>
                     new TileCommandRequest(t, new RemoteOpenConversation(c)),
+                "item" when S("tileId") is { Length: > 0 } t && S("itemId") is { Length: > 0 } item
+                            && S("act") is "check" or "select" or "switch" =>
+                    new TileCommandRequest(t, new RemoteItem(item, S("act")!)),
                 "conversations" when S("tileId") is { Length: > 0 } t => new ConversationsRequest(t),
                 "key" when S("tileId") is { Length: > 0 } t && PhoneKeys.TryParse(S("key"), out var key) =>
                     new TileCommandRequest(t, new RemoteKey(key)),

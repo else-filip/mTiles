@@ -83,7 +83,8 @@ public sealed record RemoteTileView(
     RemoteComposer Composer,
     IReadOnlyList<RemoteAction> Actions,
     string? NewLabel = null,
-    bool ListsConversations = false);
+    bool ListsConversations = false,
+    RemoteList? List = null);
 
 /// <summary>What the content of a tile says about itself — the part of <see cref="RemoteTileView"/>
 /// the tile knows and its leaf does not.</summary>
@@ -96,7 +97,8 @@ public sealed record RemoteTileBody(
     RemoteChat? Chat = null,
     RemoteScreen? Screen = null,
     RemoteComposer? Composer = null,
-    string? NewLabel = null);
+    string? NewLabel = null,
+    RemoteList? List = null);
 
 /// <param name="Text">One line saying what the tile is doing, or null.</param>
 /// <param name="Detail">What it runs on — an agent's model, a goal's phase — or null.</param>
@@ -156,6 +158,30 @@ public sealed record RemoteQuestion(
 
 /// <param name="Status"><c>pending</c>, <c>running</c> or <c>done</c>.</param>
 public sealed record RemotePlanStep(string Text, string Status);
+
+/// <summary>What a tile made of rows shows a phone — the git tile's changed files, the database tile's
+/// databases — for the view <c>list</c>.</summary>
+/// <param name="Detail">What the selected row opens onto, drawn under the list: a file's diff.</param>
+public sealed record RemoteList(IReadOnlyList<RemoteListSection> Sections, RemoteDetail? Detail = null);
+
+/// <param name="CheckAll">Whether the heading carries a tick for every row in it, and whether it is ticked;
+/// null for none.</param>
+/// <param name="Empty">What the section says when it has no rows.</param>
+public sealed record RemoteListSection(string Title, IReadOnlyList<RemoteListItem> Items, bool? CheckAll = null,
+    string? Empty = null);
+
+/// <param name="Checked">A tick in front of the row, and whether it is ticked; null for none. Only the tick
+/// itself flips it — a tap on the row never does, because a tick can be a grant.</param>
+/// <param name="Badge">A short mark before the text — a git status letter.</param>
+/// <param name="Selectable">Tapping the row opens its <see cref="RemoteList.Detail"/>.</param>
+public sealed record RemoteListItem(string Id, string Text, string? Note = null, bool? Checked = null,
+    string? Badge = null, RemoteItemSwitch? Switch = null, bool Selectable = false, bool Selected = false);
+
+/// <param name="Warning">What the phone asks before turning it on, or null.</param>
+public sealed record RemoteItemSwitch(string Label, bool On, string? Warning = null);
+
+/// <param name="Kind"><c>diff</c> or <c>text</c>.</param>
+public sealed record RemoteDetail(string Title, string Text, string Kind);
 
 /// <summary>The terminal's screen as text — the last frame, not the stream that drew it.</summary>
 public sealed record RemoteScreen(IReadOnlyList<string> Lines, string? Title);
@@ -230,6 +256,11 @@ public sealed record RemotePick(string Picker, string Value) : RemoteTileCommand
 
 /// <summary>Asks the agent to summarise its context and carry on from the summary; asked on the phone.</summary>
 public sealed record RemoteCompact : RemoteTileCommand;
+
+/// <summary>Something done to one row of a <see cref="RemoteList"/>.</summary>
+/// <param name="Act"><c>check</c> (flip its tick — <c>*</c> for every row), <c>select</c> (open it) or
+/// <c>switch</c> (flip its switch).</param>
+public sealed record RemoteItem(string ItemId, string Act) : RemoteTileCommand;
 
 /// <summary>Points the tile at another of its stored conversations.</summary>
 public sealed record RemoteOpenConversation(string ConversationId) : RemoteTileCommand;
