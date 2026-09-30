@@ -129,3 +129,34 @@ test("a pasted invitation is the code, from the whole link or on its own", () =>
   assert.equal(invitationCodeFrom("   "), null);
   assert.equal(invitationCodeFrom("https://x/#%E0%A4%A"), null);
 });
+
+import { classify, trimBlank, displayable, isRule } from "../screen.js";
+
+test("a rule across the terminal is a rule, not text", () => {
+  assert.equal(classify("────────────────").kind, "rule");
+  assert.equal(isRule("- a"), false);
+});
+
+test("a wrapped line lines up under its text, past the marker", () => {
+  const row = classify("  ● Gotowe: commit i push");
+  assert.equal(row.kind, "answer");
+  assert.equal(row.indent, 2);
+  assert.equal(row.hang, 2);
+  assert.equal(row.text, "● Gotowe: commit i push");
+});
+
+test("the agent's own marks say what a line is", () => {
+  assert.equal(classify("❯ uruchom testy").kind, "prompt");
+  assert.equal(classify("✻ Worked for 42s").kind, "status");
+  assert.equal(classify("  ⎿  8 skills available").kind, "tool");
+  assert.equal(classify("  ⏵⏵ bypass permissions on (shift+tab to cycle)").kind, "footer");
+  assert.equal(classify("plain words").kind, "text");
+});
+
+test("blank lines at the ends are the terminal's height", () => {
+  assert.deepEqual(trimBlank(["", " ", "a", "", "b", "  "]), ["a", "", "b"]);
+});
+
+test("marks a phone's font may lack are drawn with ones it has", () => {
+  assert.equal(displayable("⏵⏵ bypass ⎿ done"), "▸▸ bypass └ done");
+});

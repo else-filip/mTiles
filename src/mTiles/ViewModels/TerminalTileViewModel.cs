@@ -463,7 +463,7 @@ public partial class TerminalTileViewModel : ObservableObject, IBusyTile, ICusto
     /// <remarks>Everything <see cref="DescribeForRemote"/> reads: the screen's own counter, the activity,
     /// whether the shell is alive, the title and the detail — a shell that exits without the screen
     /// moving must still take the composer away on the phone.</remarks>
-    public long RemoteVersion =>
+    public virtual long RemoteVersion =>
         ((long)HashCode.Combine(Activity, LiveTerminal is not null,
             (CachedControl as Terminal.Avalonia.TerminalControl)?.Title, RemoteDetail) << 32)
         ^ ((CachedControl as Terminal.Avalonia.TerminalControl)?.ScreenVersion ?? 0);
@@ -471,7 +471,7 @@ public partial class TerminalTileViewModel : ObservableObject, IBusyTile, ICusto
     /// <inheritdoc />
     /// <remarks>The last frame as text — what is on the screen, not the stream that drew it — which is
     /// the only reading of a full-screen agent that makes sense anywhere but this grid.</remarks>
-    public RemoteTileBody DescribeForRemote()
+    public virtual RemoteTileBody DescribeForRemote()
     {
         var terminal = CachedControl as Terminal.Avalonia.TerminalControl;
         var live = LiveTerminal is not null;

@@ -13,6 +13,7 @@ import { layoutRects, isLegible, readingOrder } from "./geometry.js";
 import { Connection, knownMachines, lastMachineId, setLastMachine, takeInvitationFromUrl, parseInvitation, forgetMachine, PROTOCOL } from "./connection.js";
 import { Dictation } from "./dictation.js";
 import { ago } from "./format.js";
+import { classify, trimBlank, displayable } from "./screen.js";
 import { DraftMirror } from "./mirror.js";
 import { isUp, attentionOf, computerStatus } from "./computers.js";
 import { orderWorkspaces, matchesQuery, FILTER_THRESHOLD } from "./workspaces.js";
@@ -742,7 +743,8 @@ function drawTile() {
 
   // Unchanged since it was drawn — a push about something else — so nothing under the finger moves: a
   // half-typed answer keeps its focus and its keyboard.
-  const key = JSON.stringify([tile.status, tile.chat, tile.screen, tile.list, tile.view, state.answerChips, prefs.screenScroll]);
+  const key = JSON.stringify([tile.status, tile.chat, tile.screen, tile.list, tile.view, state.answerChips, prefs.screenScroll,
+    tile.view === "terminal" ? terminalView(tile) : null]);
   if (key !== lastTileKey || !view.querySelector(".tile-body")) {
     lastTileKey = key;
     drawTileBody(tile);
@@ -757,10 +759,12 @@ function drawTileBody(tile) {
   const atEnd = isAtEnd();
   // A terminal is redrawn in place while it streams: a new element each push threw away where the reader
   // had scrolled to — sideways at full size, and back to the end whenever they had scrolled up to read.
-  if (tile.view === "terminal" && updateScreenInPlace(tile, atEnd)) return;
+  const asChat = tile.view === "terminal" && tile.chat && terminalView(tile) === "chat";
+  if (tile.view === "terminal" && !asChat && updateScreenInPlace(tile, atEnd)) return;
   const body = h("div.tile-body",
     h("p.tile-status", { class: status?.activity ?? "", hidden: !status?.text }, status?.text ?? ""),
-    tile.view === "chat" ? chatView(tile)
+    tile.view === "terminal" && tile.chat ? terminalTabs(tile) : null,
+    tile.view === "chat" || asChat ? chatView(tile)
       : tile.view === "terminal" ? screenView(tile)
         : tile.view === "list" ? listView(tile)
           : actionsOnlyView(tile));
@@ -774,6 +778,29 @@ function drawTileBody(tile) {
   scrollToEnd(atEnd);
   if (!atEnd) moreBelow(true);
   revealOpenedDetail(tile);
+}
+
+/** Which of a terminal agent's two views is on screen: the conversation, or the terminal's own screen. */
+function terminalView(tile) {
+  return localStorage.getItem(`mtiles.termView.${tile.tileId}`) ?? "chat";
+}
+
+/** Conversation and Screen: what was said, read from the agent's own record, and what the terminal
+ *  shows now — the menu or the question it is waiting on. The one waiting is marked. */
+function terminalTabs(tile) {
+  const current = terminalView(tile);
+  const tab = (id, label, mark) => h("button.term-tab", {
+    class: current === id ? "on" : "", "aria-pressed": String(current === id),
+    onclick: () => {
+      localStorage.setItem(`mtiles.termView.${tile.tileId}`, id);
+      lastTileKey = null;
+      draw();
+      scrollToEnd(true);
+    },
+  }, label, mark ? activityMark("blocked") : null);
+  return h("div.term-tabs",
+    tab("chat", "Conversation"),
+    tab("screen", "Screen", current === "chat" && tile.status?.activity === "blocked"));
 }
 
 /** The screen's text and status, changed where they stand. False when there is nothing to change yet. */
@@ -1011,25 +1038,26 @@ function screenView(tile) {
  */
 function fitScreen(pre) {
   if (!pre?.isConnected) return;
-  const lines = JSON.parse(pre.dataset.lines ?? "[]").map((l) => l.replace(/\s+$/, ""));
+  const lines = trimBlank(JSON.parse(pre.dataset.lines ?? "[]").map((l) => l.replace(/\s+$/, "")));
+  const rows = lines.map(classify);
   pre.classList.toggle("full-size", prefs.screenScroll);
   if (prefs.screenScroll) {
     pre.style.fontSize = "";
-    pre.textContent = lines.join("\n");
-    return;
+  } else {
+    const style = getComputedStyle(pre);
+    const room = pre.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    const widest = Math.max(1, ...lines.filter((_, i) => rows[i].kind !== "rule").map((l) => [...l].length));
+    const size = Math.max(SCREEN_MIN_PX, Math.min(SCREEN_MAX_PX, room / (widest * charWidth(style.fontFamily))));
+    pre.style.fontSize = `${size.toFixed(2)}px`;
   }
-  const style = getComputedStyle(pre);
-  const room = pre.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-  const perPx = charWidth(style.fontFamily);
-  const widest = Math.max(1, ...lines.filter((l) => !isRule(l)).map((l) => [...l].length));
-  const size = Math.max(SCREEN_MIN_PX, Math.min(SCREEN_MAX_PX, room / (widest * perPx)));
-  const columns = Math.max(10, Math.floor(room / (size * perPx)));
-  pre.style.fontSize = `${size.toFixed(2)}px`;
-  pre.textContent = lines.map((l) => (isRule(l) ? [...l].slice(0, columns).join("") : l)).join("\n");
+  // One block per line: a wrapped line goes on under its own text, and a rule is a rule.
+  pre.replaceChildren(...rows.map((row) => row.kind === "rule"
+    ? h("span.ln.rule")
+    : h("span.ln", {
+      class: row.kind,
+      style: { "--indent": `${row.indent + row.hang}ch`, "--hang": `${row.hang}ch` },
+    }, displayable(row.text) || "\u00a0")));
 }
-
-/** A line of nothing but box-drawing dashes: a rule drawn across the terminal, not text to fit. */
-const isRule = (line) => /^[\s─━═┄┈╌\-_]+$/.test(line);
 
 const SCREEN_MIN_PX = 8.5;
 const SCREEN_MAX_PX = 12;

@@ -14,7 +14,7 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="4.*" />
     <PackageReference Include="Avalonia.Headless" Version="12.1.*" />
     <!-- An in-memory DERP relay, so the phone link is exercised end to end without a network. -->
-    <PackageReference Include="Tailcat.TestSupport" Version="0.5.3" />
+    <PackageReference Include="Tailcat.TestSupport" Version="0.5.4" />
   </ItemGroup>
 
   <!-- The launch chain is the part of this app that broke in ways manual testing could not reach:

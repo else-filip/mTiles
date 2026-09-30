@@ -1,5 +1,6 @@
 ﻿using System.Collections.Concurrent;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 using mTiles.Models;
 
 namespace mTiles.Services.Agents.SessionLogs;
@@ -171,6 +172,128 @@ public sealed class OpenCodeSessionLog : AgentSessionLog
 
     private static long Tokens(JsonElement tokens, string name) =>
         tokens.TryGetProperty(name, out var value) && value.TryGetInt64(out var count) ? count : 0;
+
+    // ── The transcript, out of opencode.db ──────────────────────────────────────────────────────
+    //
+    // Measured 2026-09-30 against 1.18.18: opencode no longer writes storage/message/*.json at all — the
+    // newest there was months old — and keeps everything in <data>/opencode/opencode.db: `session`
+    // (id, directory, time_created, time_updated), `message` (id, session_id, time_created, data: JSON
+    // with a `role`) and `part` (message_id, time_created, data: JSON with a `type`, and `text` for a
+    // text part). Read-only and unpooled, so this never holds the file the CLI is writing through WAL.
+
+    private string DatabaseFor(AiSignIn? signIn) => Path.Combine(_dataDirectory(signIn), "opencode", "opencode.db");
+
+    private static SqliteConnection OpenReadOnly(string path)
+    {
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+        }.ToString());
+        connection.Open();
+        return connection;
+    }
+
+    /// <inheritdoc />
+    /// <remarks>The files first, for an opencode that still writes them; the database otherwise.</remarks>
+    protected override SessionEntry? Find(AiSignIn? signIn, string workspaceDir, string sessionId, CancellationToken ct)
+    {
+        if (base.Find(signIn, workspaceDir, sessionId, ct) is { } filed) return filed;
+
+        var database = DatabaseFor(signIn);
+        if (!File.Exists(database)) return null;
+        using var connection = OpenReadOnly(database);
+        using var command = connection.CreateCommand();
+        command.CommandText = "select time_created, time_updated from session where id = $id";
+        command.Parameters.AddWithValue("$id", sessionId);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) return null;
+        return new SessionEntry(sessionId,
+            DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(0)),
+            DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(1)));
+    }
+
+    /// <inheritdoc />
+    public override bool ReadsTranscripts => true;
+
+    /// <inheritdoc />
+    protected override IReadOnlyList<TranscriptTurn> TranscriptOf(AiSignIn? signIn, SessionEntry entry)
+    {
+        var database = DatabaseFor(signIn);
+        if (!File.Exists(database)) return [];
+
+        using var connection = OpenReadOnly(database);
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            select m.id, m.data, p.data
+            from message m join part p on p.message_id = m.id
+            where m.session_id = $id
+            order by m.time_created, m.id, p.time_created, p.id
+            """;
+        command.Parameters.AddWithValue("$id", entry.Id);
+
+        var turns = new List<TranscriptTurn>();
+        string? messageId = null;
+        bool? fromUser = null;
+        var text = new List<string>();
+
+        void Flush()
+        {
+            var said = string.Join("\n\n", text).Trim();
+            if (fromUser is { } user && said.Length > 0) turns.Add(new TranscriptTurn(user, said));
+            text.Clear();
+        }
+
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            var id = reader.GetString(0);
+            if (id != messageId)
+            {
+                Flush();
+                messageId = id;
+                fromUser = RoleOf(reader.GetString(1));
+            }
+            if (TextOf(reader.GetString(2)) is { } part) text.Add(part);
+        }
+        Flush();
+        return turns;
+    }
+
+    /// <summary>Whether a message is the user's (true), the agent's (false) or neither.</summary>
+    internal static bool? RoleOf(string data)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(data);
+            return document.RootElement.TryGetProperty("role", out var role)
+                ? role.GetString() switch { "user" => true, "assistant" => false, _ => null }
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>A part's words, or null for anything that is not a text part somebody wrote — reasoning,
+    /// a tool call, a step marker, or text opencode itself added (<c>synthetic</c>).</summary>
+    internal static string? TextOf(string data)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(data);
+            var part = document.RootElement;
+            if (!part.TryGetProperty("type", out var type) || type.GetString() != "text") return null;
+            if (part.TryGetProperty("synthetic", out var synthetic) && synthetic.ValueKind == JsonValueKind.True) return null;
+            return part.TryGetProperty("text", out var said) ? said.GetString() : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
 
     private static long Cache(JsonElement tokens, string name) =>
         tokens.TryGetProperty("cache", out var cache) && cache.ValueKind == JsonValueKind.Object

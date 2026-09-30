@@ -24,7 +24,7 @@ namespace mTiles.ViewModels;
 /// same rule a shell profile already follows — and the reason a tile stores an id rather than a copy.
 /// </para>
 /// </remarks>
-public sealed class TerminalAgentTileViewModel : TerminalTileViewModel, IDescribedTile, IAgentTile,
+public sealed partial class TerminalAgentTileViewModel : TerminalTileViewModel, IDescribedTile, IAgentTile,
     IActiveStateTile, IInputSubmissionTile, IContextReadingTile
 {
     private readonly WorkspaceAgentFiles? _agentFiles;
@@ -281,6 +281,7 @@ public sealed class TerminalAgentTileViewModel : TerminalTileViewModel, IDescrib
     private void OnSessionRead(Services.Agents.SessionLogs.AgentSessionReading reading)
     {
         if (IsDisposed) return;
+        OnStoreChangedForPhone();
 
         // The transcript names the model the last turn actually ran on, which on a subscription is the
         // only place that does, and after a /model inside the TUI is the only place that is right.

@@ -76,4 +76,51 @@ public sealed class PiSessionLog : JsonlSessionLog
 
     private static long Tokens(JsonElement usage, string name) =>
         usage.TryGetProperty(name, out var value) && value.TryGetInt64(out var tokens) ? tokens : 0;
+
+    /// <inheritdoc />
+    public override bool ReadsTranscripts => true;
+
+    /// <inheritdoc />
+    protected override IReadOnlyList<TranscriptTurn> TranscriptOf(AiSignIn? signIn, SessionEntry entry) =>
+        FileOf(entry) is { } file ? TurnsOf(ReadAllLines(file), TurnIn) : [];
+
+    /// <summary>One transcript line as a message, or null for everything that is not one.</summary>
+    /// <remarks>Measured 2026-09-30 against 0.84.4. A message is a line of <c>type</c> <c>message</c> whose
+    /// <c>message.role</c> is <c>user</c> or <c>assistant</c> and whose <c>content</c> is a list of blocks;
+    /// only the <c>text</c> blocks are words — <c>thinking</c> and the tool calls are the work, and a
+    /// <c>toolResult</c> role is a tool answering, not anybody speaking. The other line types —
+    /// <c>session</c>, <c>model_change</c>, <c>thinking_level_change</c> — carry no message.</remarks>
+    internal static TranscriptTurn? TurnIn(string line)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(line);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("type", out var type) || type.GetString() != "message"
+                || !root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object
+                || !message.TryGetProperty("role", out var role))
+                return null;
+
+            var fromUser = role.GetString() switch { "user" => true, "assistant" => false, _ => (bool?)null };
+            if (fromUser is not { } user || !message.TryGetProperty("content", out var content)) return null;
+
+            var text = content.ValueKind switch
+            {
+                JsonValueKind.String => content.GetString() ?? "",
+                JsonValueKind.Array => string.Join("\n\n", content.EnumerateArray()
+                    .Where(block => block.ValueKind == JsonValueKind.Object
+                                    && block.TryGetProperty("type", out var kind) && kind.GetString() == "text"
+                                    && block.TryGetProperty("text", out _))
+                    .Select(block => block.GetProperty("text").GetString() ?? "")),
+                _ => "",
+            };
+            text = text.Trim();
+            return text.Length == 0 ? null : new TranscriptTurn(user, text);
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
 }

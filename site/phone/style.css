@@ -336,9 +336,27 @@ ol.plan li.step-done::before { content: "● "; color: var(--ok); }
   color: var(--text);
 }
 
+/* One block per line: a wrapped line goes on under its own text — the indent it had, plus its marker. */
+.screen .ln { display: block; padding-left: var(--indent, 0); text-indent: calc(-1 * var(--hang, 0)); min-height: 1.4em; }
+.screen .ln.rule { height: 0; min-height: 0; margin: .55em 0; border-top: 1px solid var(--hair); }
+.screen .ln.prompt { color: var(--strong); background: var(--raised); border-radius: 4px; }
+.screen .ln.answer { color: var(--strong); }
+.screen .ln.status, .screen .ln.tool, .screen .ln.footer { color: var(--muted); }
+.screen.full-size .ln { white-space: pre; padding-left: 0; text-indent: 0; }
 .screen.full-size { white-space: pre; overflow-x: auto; overflow-wrap: normal; font-size: 11.5px; }
 
 .actions-only { display: grid; gap: 8px; padding-top: 8px; }
+
+/* A terminal agent's two views: held at the top while the conversation scrolls under them. */
+.term-tabs {
+  position: sticky; top: 0; z-index: 1; display: flex; gap: 4px; padding: 4px 0 8px;
+  background: var(--canvas);
+}
+.term-tab {
+  flex: 1; min-height: 36px; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  background: none; border: 1px solid var(--hair); border-radius: 8px; color: var(--muted); font-size: var(--fs-sm);
+}
+.term-tab.on { background: var(--raised); border-color: var(--edge); color: var(--strong); }
 
 /* A way back to the end, over the bottom of the conversation while the reader is further up. */
 .to-end {

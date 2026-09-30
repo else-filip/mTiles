@@ -65,4 +65,60 @@ public class TranscriptTurnTests
         Assert.Null(CodexSessionLog.TurnIn(
             """{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"ContextCompaction"}}}"""));
     }
+
+    [Fact]
+    public void Pi_reads_the_text_of_user_and_assistant_messages()
+    {
+        Assert.Equal(new TranscriptTurn(true, "co tam ?"),
+            PiSessionLog.TurnIn("""{"type":"message","message":{"role":"user","content":[{"type":"text","text":"co tam ?"}]}}"""));
+        Assert.Equal(new TranscriptTurn(false, "Hej!"),
+            PiSessionLog.TurnIn("""{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hm"},{"type":"text","text":"Hej!"}]}}"""));
+    }
+
+    [Theory]
+    [InlineData("""{"type":"session","version":3,"id":"a"}""")]
+    [InlineData("""{"type":"model_change","modelId":"x"}""")]
+    [InlineData("""{"type":"message","message":{"role":"toolResult","content":[{"type":"text","text":"ok"}]}}""")]
+    [InlineData("""{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash"}]}}""")]
+    [InlineData("not json")]
+    public void Pi_leaves_out_everything_that_is_not_somebody_speaking(string line) =>
+        Assert.Null(PiSessionLog.TurnIn(line));
+
+    [Fact]
+    public async Task Opencode_reads_its_transcript_out_of_its_database()
+    {
+        var data = Path.Combine(Path.GetTempPath(), "mtiles-oc-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(data, "opencode"));
+        var database = Path.Combine(data, "opencode", "opencode.db");
+        try
+        {
+            using (var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={database};Pooling=False"))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    create table session (id text, directory text, time_created integer, time_updated integer);
+                    create table message (id text, session_id text, time_created integer, data text);
+                    create table part (id text, message_id text, session_id text, time_created integer, data text);
+                    insert into session values ('ses_1', 'D:/w', 1, 3);
+                    insert into message values ('m1', 'ses_1', 1, '{"role":"user"}');
+                    insert into message values ('m2', 'ses_1', 2, '{"role":"assistant"}');
+                    insert into part values ('p1', 'm1', 'ses_1', 1, '{"type":"text","text":"co to za projekt ?"}');
+                    insert into part values ('p2', 'm1', 'ses_1', 1, '{"type":"text","text":"reminder","synthetic":true}');
+                    insert into part values ('p3', 'm2', 'ses_1', 2, '{"type":"reasoning","text":"thinking"}');
+                    insert into part values ('p4', 'm2', 'ses_1', 3, '{"type":"text","text":"To jest kurs."}');
+                    """;
+                command.ExecuteNonQuery();
+            }
+
+            var log = new OpenCodeSessionLog(_ => data);
+            var turns = await log.ReadTranscriptAsync(null, "D:/w", "ses_1");
+
+            Assert.Equal([new TranscriptTurn(true, "co to za projekt ?"), new TranscriptTurn(false, "To jest kurs.")], turns);
+        }
+        finally
+        {
+            try { Directory.Delete(data, recursive: true); } catch { /* a temp directory */ }
+        }
+    }
 }

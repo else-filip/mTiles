@@ -75,7 +75,7 @@
          machine listens to the network — no port, no certificate, no firewall rule. See
          docs/adr/0006-phone-over-relays.md. Carries libsodium (Sodium.Core) as a native binary, which
          is why verify-natives.ps1 looks for it. -->
-    <PackageReference Include="Tailcat.Link" Version="0.5.3" />
+    <PackageReference Include="Tailcat.Link" Version="0.5.4" />
   </ItemGroup>
 
   <ItemGroup>

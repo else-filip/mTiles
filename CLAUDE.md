@@ -1789,6 +1789,19 @@ What is worth knowing before touching `Services/Phone/` or `site/phone/`:
   sideways with *Show the screen at full size* on — survives every push, and a way back to the end
   appears instead of the page pulling them there. t3code runs a real emulator on a canvas and resizes the
   PTY to the viewport; that is not open to us, because the terminal is the desktop's and keeps its size.
+  Its lines are set one block each (`site/phone/screen.js`, pure and tested): a wrapped line goes on under
+  its own text past the TUI's marker, a rule is drawn as a rule, the marks a phone's font may lack are
+  drawn with ones it has, and the prompt, the agent's answer, its status and its mode bar are told apart
+  by the marks they open with — the screen text carries no colours.
+- **A terminal agent tile has two views on a phone: Conversation and Screen.** Conversation is the CLI's
+  own record of what was said (`IAgentSessionLog.ReadTranscriptAsync`, the same read a handover makes),
+  drawn as the Agent tile's chat; Screen is the last frame, for the menu or question on it — and its tab
+  is marked while the tile waits on one. Read only while a phone is looking, at most every two seconds,
+  and again when the store changes. **Four CLIs have a readable transcript**: Claude Code and codex, pi
+  (its JSONL, `type: message`, text blocks only) and opencode — **out of `opencode.db`, not the JSON
+  storage**: measured 2026-09-30 against 1.18.18, opencode writes nothing under `storage/message/` any
+  more and keeps `session`, `message` and `part` in SQLite, read here read-only and unpooled. agy and
+  Grok have none, and show the screen alone.
 - **A tile made of rows is a list** (`RemoteList`, view `list`, `RemoteItem` — `check`, `select`,
   `switch`): the **git** tile's changed files with their ticks, the diff of the one opened (cut at
   `RemoteDiffLimit`) and the commit message as its composer, mirrored like any other draft; the **database**
