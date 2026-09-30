@@ -724,7 +724,7 @@ public partial class SettingsViewModel : ObservableObject
         EditConnPort = 0;
         EditConnUsername = "";
         EditConnPassword = "";
-        EditConnIntegrated = true;
+        EditConnIntegrated = false;
         BeginEditing(ref _isEditingManualConnection);
     }
 
