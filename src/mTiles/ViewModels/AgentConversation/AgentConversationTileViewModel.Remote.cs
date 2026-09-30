@@ -69,6 +69,7 @@ public sealed partial class AgentConversationTileViewModel
                 canType ? "Message the agent" : IsStarting ? "The agent is starting…" : "The agent is not running",
                 CanInterrupt: IsBusy && CanInterrupt,
                 Draft: Draft.Length > 0 ? Draft : null,
+                TakesAttachments: true,
                 Pickers: RemotePickers(),
                 CanCompact: CanCompactNow(),
                 SyncsDraft: true),

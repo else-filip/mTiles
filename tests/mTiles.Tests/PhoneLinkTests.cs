@@ -244,6 +244,45 @@ public sealed class PhoneLinkTests : IAsyncLifetime
         Assert.Equal(1, _engine.Calls);
     }
 
+    /// <summary>A file the phone sends and closes on purpose reaches the tile whole, and its marker comes back
+    /// to the phone rather than being typed into the tile.</summary>
+    [Fact]
+    public async Task An_attachment_closed_by_the_phone_is_answered_with_its_marker()
+    {
+        var (phone, pushes) = await PairAsync();
+
+        await using (var attach = await phone.OpenChannelAsync(PhoneProtocol.AttachChannel, Ct))
+        {
+            await attach.SendAsync("""{"id":"u1","tileId":"chat","name":"a.png","mime":"image/png"}"""u8.ToArray(), Ct);
+            await attach.SendAsync(new byte[1000], Ct);
+            await attach.SendAsync(new byte[500], Ct);
+        }
+
+        await WaitUntil(() => pushes.Any(p => Type(p) == "attached"), "the answer has arrived");
+        var answer = pushes.First(p => Type(p) == "attached");
+        Assert.Equal("u1", answer.GetProperty("id").GetString());
+        Assert.Equal("[Image #1]", answer.GetProperty("marker").GetString());
+        Assert.Equal(("a.png", 1500), Assert.Single(_workspaces.Chat.Attached));
+    }
+
+    /// <summary>A tile that takes no attachments says so, rather than the phone waiting out its timeout.</summary>
+    [Fact]
+    public async Task An_attachment_for_a_tile_that_takes_none_is_refused_in_words()
+    {
+        var (phone, pushes) = await PairAsync();
+
+        await using (var attach = await phone.OpenChannelAsync(PhoneProtocol.AttachChannel, Ct))
+        {
+            await attach.SendAsync("""{"id":"u2","tileId":"other","name":"a.txt"}"""u8.ToArray(), Ct);
+            await attach.SendAsync(new byte[10], Ct);
+        }
+
+        await WaitUntil(() => pushes.Any(p => Type(p) == "attached"), "the refusal has arrived");
+        var answer = pushes.First(p => Type(p) == "attached");
+        Assert.Equal("That tile takes no attachments.", answer.GetProperty("error").GetString());
+        Assert.Empty(_workspaces.Chat.Attached);
+    }
+
     /// <summary>A recording whose session drops is half a sentence, and nothing is transcribed.</summary>
     [Fact]
     public async Task A_recording_cut_off_with_the_session_is_cancelled()
@@ -304,7 +343,7 @@ public sealed class PhoneLinkTests : IAsyncLifetime
     /// second tile that must never hear about it.</summary>
     private sealed class FakeWorkspaces : IPhoneWorkspaces
     {
-        public readonly StubTile Chat = new("chat");
+        public readonly AttachingTile Chat = new("chat");
         public readonly StubTile Other = new("other");
         private readonly LeafTileNodeViewModel _chat;
         private readonly LeafTileNodeViewModel _other;
@@ -336,7 +375,19 @@ public sealed class PhoneLinkTests : IAsyncLifetime
         public LeafTileNodeViewModel? ActiveTile => _chat;
     }
 
-    private sealed class StubTile(string name) : IRemoteViewTile, ITileActions
+    /// <summary>A chat that takes a photo or a file, and answers with a marker naming how many it holds.</summary>
+    private sealed class AttachingTile(string name) : StubTile(name), IRemoteAttachTile
+    {
+        public ConcurrentQueue<(string Name, int Length)> Attached { get; } = new();
+
+        public Task<RemoteAttachResult> AttachFromRemoteAsync(string name, string mimeType, byte[] data)
+        {
+            Attached.Enqueue((name, data.Length));
+            return Task.FromResult(new RemoteAttachResult($"[Image #{Attached.Count}]"));
+        }
+    }
+
+    private class StubTile(string name) : IRemoteViewTile, ITileActions
     {
         private readonly List<string> _lines = ["hello from the tile"];
         private long _version;

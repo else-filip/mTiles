@@ -8,7 +8,7 @@
 // mTiles pushed or answered; nothing here decides what a tile is allowed to do.
 
 import { h, fill, activityMark, icon } from "./dom.js";
-import { parse, render } from "./markdown.js";
+import { parse, render, renderLinked, linkSpansAcross, renderSpans } from "./markdown.js";
 import { layoutRects, isLegible, readingOrder } from "./geometry.js";
 import { Connection, knownMachines, lastMachineId, setLastMachine, takeInvitationFromUrl, parseInvitation, forgetMachine, PROTOCOL } from "./connection.js";
 import { Dictation } from "./dictation.js";
@@ -192,6 +192,8 @@ function onPush(m, message) {
     keepDictatedFor(m, message);
     return;
   }
+  // An upload's answer is awaited whichever computer is on screen now: it names the draft it goes into.
+  if (message.type === "attached") { attached(m, message); return; }
   if (!isCurrent(m)) {
     // A computer in the background is listened to only for what the list of computers shows.
     const before = elsewhereNeedsYou();
@@ -957,7 +959,7 @@ function chatItem(item) {
     body.append(render(parse(item.text)));
     li.append(body);
   } else {
-    li.append(h("pre.plain", item.text));
+    li.append(h("pre.plain", renderLinked(item.text)));
   }
   // What was said can be said again, changed: the desktop's Up arrow in the composer, as a tap.
   if (item.role === "user" && item.text?.trim()) {
@@ -1050,13 +1052,16 @@ function fitScreen(pre) {
     const size = Math.max(SCREEN_MIN_PX, Math.min(SCREEN_MAX_PX, room / (widest * charWidth(style.fontFamily))));
     pre.style.fontSize = `${size.toFixed(2)}px`;
   }
+  // An address the terminal broke at its width links to the whole address from every line it is on.
+  const width = Math.max(0, ...lines.map((l) => [...l].length));
+  const spans = linkSpansAcross(rows.map((row) => displayable(row.text)), lines.map((l) => [...l].length >= width));
   // One block per line: a wrapped line goes on under its own text, and a rule is a rule.
-  pre.replaceChildren(...rows.map((row) => row.kind === "rule"
+  pre.replaceChildren(...rows.map((row, i) => row.kind === "rule"
     ? h("span.ln.rule")
     : h("span.ln", {
       class: row.kind,
       style: { "--indent": `${row.indent + row.hang}ch`, "--hang": `${row.hang}ch` },
-    }, displayable(row.text) || "\u00a0")));
+    }, row.text ? renderSpans(spans[i]) : "\u00a0")));
 }
 
 const SCREEN_MIN_PX = 8.5;
@@ -1220,8 +1225,9 @@ function drawDock(tile) {
   // The computer's draft is left out: every mirror comes back in it. Only a draft being offered is in the key,
   // so the offer shows what is there now, the text "Edit here" takes.
   const { draft: _computerDraft, ...offered } = composer;
+  const sending = [...uploads.values()].filter((u) => u.tileId === tile.tileId);
   const dockKey = JSON.stringify([tile.tileId, offered, tile.actions, tile.newLabel, dictating, prefs.keysHidden,
-    empty, hasHistory, offerRemote && remoteDraft]);
+    empty, hasHistory, offerRemote && remoteDraft, sending.map((u) => u.name)]);
   paintContext(tile.status?.contextPercent);
   if (dockKey === lastDockKey && dock.firstChild) return;
   lastDockKey = dockKey;
@@ -1317,11 +1323,117 @@ function drawDock(tile) {
     modeChips.length ? h("div.dock-modes", modeChips) : null,
     tools.length || settings
       ? h("div.dock-bar", h("div.dock-tools", tools), h("div.dock-settings", settings)) : null,
+    sending.length ? h("div.uploads", sending.map((u) => h("span.upload", activityMark("working"), u.name))) : null,
     composer.enabled || composer.placeholder
-      ? h("div.dock-row", more, input, mic, primary)
+      ? h("div.dock-row", more,
+        composer.takesAttachments ? h("button.tool.attach", {
+          "aria-label": "Attach a photo or a file", title: "Attach a photo or a file",
+          onclick: () => { attachFor = tile.tileId; picker.click(); },
+        }, icon("clip")) : null,
+        input, mic, primary)
       : more ? h("div.dock-row.only-more", more) : null);
   grow(input);
   if (focused) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+}
+
+// ── attachments ──
+//
+// A photo or a file for the next message, sent on a channel of its own the way a recording is — a request
+// is capped at 64 KB and a photo is megabytes. The computer keeps it and answers with the marker that names
+// it ([Image #1], @.mtiles/attachments/…), which goes into this box; the box is mirrored into the tile's.
+// A photo is scaled to the size the desktop gives a pasted image before it goes, because a phone's camera
+// takes twelve megapixels and an agent is sent at most 1568 on the long edge.
+
+const UPLOAD_CHUNK = 48 * 1024;
+const UPLOAD_LIMIT = 20 * 1024 * 1024;
+const IMAGE_EDGE = 1568;
+// How long the computer has to answer a file already sent before the phone says it did not arrive.
+const UPLOAD_ANSWER_MS = 60_000;
+const uploads = new Map();       // id -> { name, tileId, timer }
+let attachFor = null;
+const picker = h("input", {
+  type: "file", multiple: true, hidden: true,
+  onchange: (e) => {
+    const tileId = attachFor;
+    for (const file of e.target.files) if (tileId) upload(tileId, file);
+    e.target.value = "";
+  },
+});
+root.append(picker);
+
+async function upload(tileId, file) {
+  const link = state.conn?.link;
+  if (!link) { say("Not connected to mTiles.", "error"); return; }
+  let name = file.name || "photo.jpg";
+  let mime = file.type || "application/octet-stream";
+  let bytes = null;
+  if (mime.startsWith("image/") && !(mime === "image/png" && file.size < 2_000_000)) {
+    const shrunk = await shrinkPhoto(file).catch(() => null);
+    if (shrunk) { bytes = shrunk; mime = "image/jpeg"; name = `${name.replace(/\.[^.]+$/, "")}.jpg`; }
+  }
+  bytes ??= new Uint8Array(await file.arrayBuffer());
+  if (bytes.length > UPLOAD_LIMIT) { say(`${name} is larger than 20 MB.`, "error"); return; }
+
+  const id = crypto.randomUUID();
+  uploads.set(id, { name, tileId });
+  lastDockKey = null;
+  draw();
+  try {
+    const channel = await link.openChannel("attach");
+    await channel.send(new TextEncoder().encode(JSON.stringify({ id, tileId, name, mime })));
+    for (let at = 0; at < bytes.length; at += UPLOAD_CHUNK) await channel.send(bytes.subarray(at, at + UPLOAD_CHUNK));
+    await channel.close();
+    const sent = uploads.get(id);
+    if (sent) sent.timer = setTimeout(() => uploadFailed(id), UPLOAD_ANSWER_MS);
+  } catch {
+    uploadFailed(id);
+  }
+}
+
+/** An upload that went wrong, or that the computer never answered. */
+function uploadFailed(id) {
+  const upload = uploads.get(id);
+  if (!upload) return;
+  uploads.delete(id);
+  say(`${upload.name} could not be sent.`, "error");
+  lastDockKey = null;
+  draw();
+}
+
+/** A photo at the size an agent is sent, as JPEG — or null where this browser cannot decode it. */
+async function shrinkPhoto(file) {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, IMAGE_EDGE / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close?.();
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.88));
+  return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+}
+
+/** The computer's answer to an upload: its marker into the box it was sent from, or why not. */
+function attached(m, message) {
+  const upload = uploads.get(message.id);
+  clearTimeout(upload?.timer);
+  uploads.delete(message.id);
+  lastDockKey = null;
+  if (message.error) { say(message.error, "error"); draw(); return; }
+  if (message.notice) say(message.notice);
+  const marker = message.marker ?? "";
+  const into = (text) => (text.trim() ? `${text.trimEnd()} ${marker} ` : `${marker} `);
+  if (isShowingTile(m, message.tileId)) {
+    draft = into(draft);
+    draw();
+    mirror.soon();
+  } else {
+    // Left the tile while it went: the marker waits in that tile's own draft on this phone.
+    const key = `${m.id}/${message.tileId}`;
+    const kept = drafts.get(key) ?? { text: "", adopted: null };
+    drafts.set(key, { ...kept, text: into(kept.text) });
+    say(`${upload?.name ?? "The file"} is attached to the draft in that tile.`);
+  }
 }
 
 function pressKey(tile, key) {

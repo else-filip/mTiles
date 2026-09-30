@@ -11,7 +11,7 @@ namespace mTiles.ViewModels;
 /// Every command goes through the same command the tile's own buttons run, so each rule about phases,
 /// pauses and what may be answered when is kept in one place and not restated for a phone.
 /// </remarks>
-public partial class GoalTileViewModel
+public partial class GoalTileViewModel : IRemoteAttachTile
 {
     private long _remoteVersion;
 
@@ -48,6 +48,7 @@ public partial class GoalTileViewModel
                 : IsRunning ? "The goal is running" : "Type a message",
                 CanInterrupt: IsRunning && !IsPaused,
                 Draft: InputText.Length > 0 ? InputText : null,
+                TakesAttachments: true,
                 Modes: RemoteModes(),
                 StartsOver: StartingOverWouldAskHere(),
                 SyncsDraft: true),
@@ -296,6 +297,30 @@ public partial class GoalTileViewModel
 
         StartAnswered(send.Discard, command);
         return null;
+    }
+
+    /// <inheritdoc />
+    public async Task<RemoteAttachResult> AttachFromRemoteAsync(string name, string mimeType, byte[] data)
+    {
+        if (RemoteAttachmentFile.IsAgentImage(mimeType))
+        {
+            string path;
+            try
+            {
+                // Decoded and encoded off the UI thread: a photo is hundreds of milliseconds of both.
+                path = await Task.Run(() => ImageStore.SavePng(PngImage.From(data)));
+            }
+            catch (Exception ex)
+            {
+                return new RemoteAttachResult(null, $"The image could not be saved: {ex.Message}");
+            }
+
+            var marker = _engine.AttachImage(path);
+            SaveStateSoon();
+            return new RemoteAttachResult(marker);
+        }
+
+        return await RemoteAttachmentFile.AttachAsync(name, data, _workingDirectory);
     }
 
     /// <summary>The phone's answer to each question it answered, joined the way the composer shows a choice.</summary>

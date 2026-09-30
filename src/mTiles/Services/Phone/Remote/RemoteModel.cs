@@ -205,7 +205,8 @@ public sealed record RemoteAction(string Id, string Label, string Icon, bool Ena
 /// it is typed (<see cref="RemoteDraft"/>).</param>
 public sealed record RemoteComposer(bool Enabled, string Placeholder, bool Keys = false, bool CanInterrupt = false,
     string? Draft = null, IReadOnlyList<RemoteSendMode>? Modes = null, bool StartsOver = false,
-    IReadOnlyList<RemotePicker>? Pickers = null, bool CanCompact = false, bool SyncsDraft = false)
+    IReadOnlyList<RemotePicker>? Pickers = null, bool CanCompact = false, bool SyncsDraft = false,
+    bool TakesAttachments = false)
 {
     public static readonly RemoteComposer None = new(false, "");
 }

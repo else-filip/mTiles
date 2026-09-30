@@ -148,6 +148,24 @@ public sealed class PhoneProtocolTests
         Assert.Null(Parse("""{"type":"item","tileId":"t","itemId":"a.cs","act":"delete"}"""));
     }
 
+    [Theory]
+    [InlineData("""{"id":"u1","tileId":"t","name":"photo.jpg","mime":"image/jpeg"}""", "photo.jpg", "image/jpeg")]
+    [InlineData("""{"id":"u1","tileId":"t","name":"../../evil.txt"}""", "evil.txt", "application/octet-stream")]
+    [InlineData("""{"id":"u1","tileId":"t","name":"C:\\Windows\\x.dll","mime":"x/y"}""", "x.dll", "x/y")]
+    [InlineData("""{"id":"u1","tileId":"t","name":".."}""", "attachment", "application/octet-stream")]
+    public void An_attachment_keeps_only_the_last_segment_of_its_name(string json, string name, string mime)
+    {
+        var header = PhoneProtocol.ParseAttachHeader(Encoding.UTF8.GetBytes(json));
+        Assert.Equal(new PhoneProtocol.AttachHeader("u1", "t", name, mime), header);
+    }
+
+    [Theory]
+    [InlineData("""{"tileId":"t","name":"a"}""")]
+    [InlineData("""{"id":"u1","name":"a"}""")]
+    [InlineData("not json")]
+    public void An_attachment_header_without_an_id_or_a_tile_is_refused(string json) =>
+        Assert.Null(PhoneProtocol.ParseAttachHeader(Encoding.UTF8.GetBytes(json)));
+
     [Fact]
     public void A_recording_can_ask_to_come_back_to_the_phone_rather_than_into_the_tile()
     {

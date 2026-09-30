@@ -39,6 +39,7 @@ public sealed class PhoneBridgeManager : IAsyncDisposable
     private readonly PhoneDictation _phoneDictation;
     private readonly IPhoneWorkspaces _workspaces;
     private readonly IUiDispatcher _dispatcher;
+    private readonly PhoneAttachments _attachments;
     private readonly Func<LinkOptions> _linkOptions;
     private readonly TimeSpan _pushInterval;
 
@@ -105,6 +106,7 @@ public sealed class PhoneBridgeManager : IAsyncDisposable
         _appliedEnabled = settings.Settings.Phone.Enabled;
 
         _phoneDictation = new PhoneDictation(settings, dictation, router, workspaces, _dispatcher);
+        _attachments = new PhoneAttachments(workspaces, _dispatcher);
         _phoneDictation.Changed += OnDictationChanged;
         _settings.SettingsChanged += OnSettingsChanged;
     }
@@ -202,6 +204,7 @@ public sealed class PhoneBridgeManager : IAsyncDisposable
             var host = await TailcatLink.HostManyAsync(PhoneProtocol.AppName, _linkOptions()).ConfigureAwait(false);
             host.SetRequestHandler(HandleRequestAsync);
             host.OnChannel(PhoneProtocol.AudioChannel, _phoneDictation.HandleAudioAsync);
+            host.OnChannel(PhoneProtocol.AttachChannel, _attachments.HandleAsync);
             host.PeerJoined += OnPeerJoined;
             host.PeerLeft += OnPeerLeft;
             _host = host;

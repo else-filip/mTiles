@@ -160,3 +160,44 @@ test("blank lines at the ends are the terminal's height", () => {
 test("marks a phone's font may lack are drawn with ones it has", () => {
   assert.equal(displayable("⏵⏵ bypass ⎿ done"), "▸▸ bypass └ done");
 });
+
+import { linkSpans, linkSpansAcross } from "../markdown.js";
+
+test("a bare address is a link, without the punctuation after it", () => {
+  const spans = inline("see https://github.com/b-y-t-e/mTiles. then");
+  assert.equal(spans[1].type, "link");
+  assert.equal(spans[1].href, "https://github.com/b-y-t-e/mTiles");
+  assert.equal(spans[2].text, ". then");
+});
+
+test("addresses in plain text are links, and nothing else is", () => {
+  const spans = linkSpans("push to https://a.b/c (https://d.e/f) and javascript:alert(1)");
+  assert.deepEqual(spans.filter((s) => s.type === "link").map((s) => s.href), ["https://a.b/c", "https://d.e/f"]);
+});
+
+test("an address in a link's label stays text, and the link keeps its own address", () => {
+  const [a] = inline("[see https://a.b](https://c.d)");
+  assert.equal(a.href, "https://c.d");
+  assert.ok(a.children.every((s) => s.type !== "link"));
+});
+
+test("an address the terminal broke at its width links to the whole address from every line", () => {
+  const spans = linkSpansAcross(["open https://a.b/lo", "ng/path. then", "next"], [true, false, false]);
+  assert.equal(spans[0][1].href, "https://a.b/long/path");
+  assert.equal(spans[1][0].href, "https://a.b/long/path");
+  assert.equal(spans[1][1].text, ". then");
+});
+
+test("an address on a line that did not fill the width does not take the next line", () => {
+  const spans = linkSpansAcross(["see https://a.b", "then"], [false, false]);
+  assert.equal(spans[0][1].href, "https://a.b");
+  assert.equal(spans[1][0].type, "text");
+});
+
+test("an address ending the widest line does not take the plain word that starts the next", () => {
+  const lines = ["Listening on http://localhost:5173", "press q to quit"];
+  const width = Math.max(...lines.map((l) => l.length));
+  const spans = linkSpansAcross(lines, lines.map((l) => l.length >= width));
+  assert.equal(spans[0][1].href, "http://localhost:5173");
+  assert.ok(spans[1].every((s) => s.type === "text"));
+});

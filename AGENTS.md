@@ -1802,6 +1802,20 @@ What is worth knowing before touching `Services/Phone/` or `site/phone/`:
   storage**: measured 2026-09-30 against 1.18.18, opencode writes nothing under `storage/message/` any
   more and keeps `session`, `message` and `part` in SQLite, read here read-only and unpooled. agy and
   Grok have none, and show the screen alone.
+- **A photo or a file goes into the Agent or the Goal tile's next message from the phone**
+  (`PhoneAttachments`, `IRemoteAttachTile`, `RemoteComposer.TakesAttachments`): one channel per file, the
+  way a recording has one — `attach`, a JSON header (`PhoneProtocol.ParseAttachHeader`, which keeps only the
+  name's last segment, since it becomes a file name), the bytes, and the channel closing on purpose; at most
+  20 MB (`AttachmentStore.MaxCopyBytes`). A photo is scaled on the phone to the 1568 px an agent is sent and
+  re-encoded as PNG (off the UI thread) only for the Goal tile, because its store writes what it is given under `.png`; a file is
+  written beside the workspace's other attachments (`RemoteAttachmentFile`) and named by an `@` mention.
+  **The tile keeps it and does not type its marker** — the answer (`attached`) carries the marker back
+  into the phone's own box, which is mirrored into the tile's; typed on both sides, the two boxes would
+  disagree and the mirror would stop at the next keystroke.
+- **An address anywhere on the page is a link a thumb can open** (`markdown.js` → `linkSpans`,
+  `renderLinked`): bare `http(s)` addresses in the agent's markdown, inside inline code, in a user's own
+  message and on a terminal's screen, never taking the full stop that ends the sentence, and never
+  anything but `http`/`https`.
 - **A tile made of rows is a list** (`RemoteList`, view `list`, `RemoteItem` — `check`, `select`,
   `switch`): the **git** tile's changed files with their ticks, the diff of the one opened (cut at
   `RemoteDiffLimit`) and the commit message as its composer, mirrored like any other draft; the **database**

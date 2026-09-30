@@ -38,7 +38,7 @@ namespace mTiles.ViewModels.AgentConversation;
 /// </remarks>
 public sealed partial class AgentConversationTileViewModel : ObservableObject,
     IBusyTile, IMaximizableTile, ITextInputTile, IDescribedTile, ITileActions, IAgentTile, IProcessTile,
-    INewConversationTile, IRemoteViewTile, IRemotePreviewTile, IRemoteConversationsTile
+    INewConversationTile, IRemoteViewTile, IRemotePreviewTile, IRemoteConversationsTile, IRemoteAttachTile
 {
     public const string NewConversationActionId = TileActionIds.NewConversation;
 
@@ -442,6 +442,20 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
     /// so a marker deleted by accident and brought back by an undo still names its picture.</summary>
     private readonly List<ComposerImage> _waitingImages = [];
 
+    /// <summary>Markers of images sent from a phone that the draft does not name yet, with when they were
+    /// answered: the phone types them, so until its mirror arrives they are counted here rather than by the
+    /// chips — and for no longer than <see cref="RemoteMarkerWait"/>, since a mirror refused or a marker
+    /// deleted on the phone never arrives at all.</summary>
+    private readonly Dictionary<string, long> _imagesAwaitingTheirMarker = [];
+
+
+    /// <summary>The clock <see cref="RemoteMarkerWait"/> is measured on — a test hands it a manual one.</summary>
+    internal TimeProvider Clock { get; set; } = TimeProvider.System;
+
+    /// <summary>How long an image sent from a phone counts against <see cref="MaxImages"/> before its marker
+    /// reaches the draft.</summary>
+    private static readonly TimeSpan RemoteMarkerWait = TimeSpan.FromMinutes(1);
+
     /// <summary>The images going with the next message: those whose markers <see cref="Draft"/> holds, in
     /// the order it holds them.</summary>
     public ComposerChips<ComposerImage> Attachments { get; } = new();
@@ -635,7 +649,7 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
         // A host with no live agent refuses the message out loud, and the draft stays for the restart.
         if (host.HasSession)
         {
-            _waitingImages.Clear();
+            ForgetSentImages();
             Draft = "";
             _binding.MessageSent();
             LastUsedAgentInstance.Remember(_settings, Instance);
@@ -688,6 +702,8 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
     /// its mention does.</summary>
     partial void OnDraftChanged(string value)
     {
+        foreach (var marker in _imagesAwaitingTheirMarker.Keys.Where(value.Contains).ToList())
+            _imagesAwaitingTheirMarker.Remove(marker);
         Attachments.Show(ComposerImageChips.NamedIn(value, _waitingImages, image => image.Index));
         ComposerFiles.Show(FileScanner.In(value));
     }
@@ -753,16 +769,23 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
     [RelayCommand]
     public void AttachImage(ImageAttachment image)
     {
+        if (KeepImage(image) is { } marker) InsertIntoDraft(marker);
+    }
+
+    /// <summary>Keeps an image for the next message and answers its marker, or null — with the notice set —
+    /// when it cannot go.</summary>
+    private string? KeepImage(ImageAttachment image)
+    {
         if (image.Base64Data.Length * 3L / 4 > MaxImageBytes)
         {
             ComposerNotice = "That image is larger than 5 MB and was not attached.";
-            return;
+            return null;
         }
 
-        if (Attachments.Items.Count >= MaxImages)
+        if (Attachments.Items.Count + ImagesStillAwaitingTheirMarker() >= MaxImages)
         {
             ComposerNotice = $"At most {MaxImages} images go with one message.";
-            return;
+            return null;
         }
 
         ComposerNotice = null;
@@ -770,7 +793,47 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
         // in the draft can still mean the image that had it.
         var composed = new ComposerImage(_waitingImages.Count == 0 ? 1 : _waitingImages.Max(a => a.Index) + 1, image);
         _waitingImages.Add(composed);
-        InsertIntoDraft(composed.Marker);
+        return composed.Marker;
+    }
+
+    /// <summary>Keeps an image whose marker the phone will type, and counts it until the mirror brings it.</summary>
+    private string? KeepRemoteImage(ImageAttachment image)
+    {
+        var marker = KeepImage(image);
+        if (marker is null) return null;
+        _imagesAwaitingTheirMarker[marker] = Clock.GetTimestamp();
+        return marker;
+    }
+
+    /// <summary>Forgets the images that went with a message, keeping those sent from a phone whose marker is
+    /// still on its way: a message sent at the desk meanwhile did not carry them. One whose marker never came
+    /// within <see cref="RemoteMarkerWait"/> is forgotten with the rest, or a later <c>[Image #k]</c> would
+    /// bring back a picture nobody attached.</summary>
+    private void ForgetSentImages()
+    {
+        ImagesStillAwaitingTheirMarker();
+        _waitingImages.RemoveAll(image => !_imagesAwaitingTheirMarker.ContainsKey(image.Marker));
+    }
+
+    /// <summary>Forgets the phone's markers that never arrived and counts the rest.</summary>
+    private int ImagesStillAwaitingTheirMarker()
+    {
+        foreach (var marker in _imagesAwaitingTheirMarker.Where(p => Clock.GetElapsedTime(p.Value) >= RemoteMarkerWait)
+                     .Select(p => p.Key).ToList())
+            _imagesAwaitingTheirMarker.Remove(marker);
+        return _imagesAwaitingTheirMarker.Count;
+    }
+
+    /// <inheritdoc />
+    public async Task<RemoteAttachResult> AttachFromRemoteAsync(string name, string mimeType, byte[] data)
+    {
+        if (RemoteAttachmentFile.IsAgentImage(mimeType))
+        {
+            var marker = KeepRemoteImage(new ImageAttachment(mimeType, Convert.ToBase64String(data), name));
+            return new RemoteAttachResult(marker, marker is null ? ComposerNotice : null);
+        }
+
+        return await RemoteAttachmentFile.AttachAsync(name, data, _workingDirectory);
     }
 
     /// <summary>Takes an image's marker out of the text, which takes its chip — and the image — out of the

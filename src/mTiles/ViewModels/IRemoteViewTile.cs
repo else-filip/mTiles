@@ -34,6 +34,21 @@ public interface IRemoteViewTile : ITile
 }
 
 /// <summary>
+/// Tile content whose next message can carry a photo or a file sent from a phone.
+/// </summary>
+/// <remarks>The tile keeps the attachment and answers the marker that names it — an image's
+/// <c>[Image #n]</c>, a file's <c>@</c> mention — <b>without typing it</b>: the phone puts it into its own box,
+/// which is mirrored into the tile's. Pictures arrive as PNG.</remarks>
+public interface IRemoteAttachTile : ITile
+{
+    Task<RemoteAttachResult> AttachFromRemoteAsync(string name, string mimeType, byte[] data);
+}
+
+/// <param name="Marker">What to put in the message to name it, or null when it was refused.</param>
+/// <param name="Notice">Why it was refused, or what to know about it — a file named where it is.</param>
+public sealed record RemoteAttachResult(string? Marker, string? Notice = null);
+
+/// <summary>
 /// Tile content that holds one of several stored conversations, and can list them for a phone.
 /// </summary>
 /// <remarks>Asked on demand rather than pushed: the list is a query across the store and changes only when

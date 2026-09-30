@@ -512,6 +512,19 @@ ol.plan li.step-done::before { content: "● "; color: var(--ok); }
 .remote-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--body); }
 .muted { color: var(--muted); }
 
+/* What is on its way to the computer, above the box it will be named in. */
+.uploads { display: flex; flex-wrap: wrap; gap: 6px; }
+.upload {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
+  padding: 4px 10px; border-radius: 14px; background: var(--surface); color: var(--body); font-size: var(--fs-xs);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.upload .mark { width: 12px; height: 12px; }
+
+/* An address in what the agent or the terminal said: underlined, and wide enough to hit with a thumb. */
+.screen a, .plain a, .md a { color: #8fb8e6; text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
+.screen a { padding: 2px 0; }
+
 /* ── sheets' lists ── */
 
 .history { display: grid; gap: 4px; max-height: 55vh; overflow: auto; }

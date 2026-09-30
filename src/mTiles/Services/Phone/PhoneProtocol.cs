@@ -47,6 +47,39 @@ internal static class PhoneProtocol
     /// </remarks>
     public const string AudioChannel = "audio";
 
+    /// <summary>The channel a phone sends a photo or a file on: a JSON header
+    /// (<c>{"id":…,"tileId":…,"name":…,"mime":…}</c>), then the bytes, then the channel closing on purpose.
+    /// See <see cref="PhoneAttachments"/>.</summary>
+    public const string AttachChannel = "attach";
+
+    /// <summary>What an attachment is: the phone's own id for it, the tile it is for, and the file's name and
+    /// type.</summary>
+    internal sealed record AttachHeader(string Id, string TileId, string Name, string Mime);
+
+    /// <summary>Reads an attachment's header frame, or null for anything that is not one.</summary>
+    /// <remarks>The name comes from the network and becomes a file name, so only its last segment is kept
+    /// and characters a file system refuses are replaced.</remarks>
+    internal static AttachHeader? ParseAttachHeader(ReadOnlySpan<byte> utf8)
+    {
+        if (utf8.Length is 0 or > 4096) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(utf8.ToArray());
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return null;
+            string? S(string name) => root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+            if (S("id") is not { Length: > 0 } id || S("tileId") is not { Length: > 0 } tile) return null;
+            var name = Path.GetFileName((S("name") ?? "").Replace('\\', '/').Split('/').Last());
+            foreach (var bad in Path.GetInvalidFileNameChars()) name = name.Replace(bad, '_');
+            if (name.Trim('.', ' ').Length == 0) name = "attachment";
+            return new AttachHeader(id, tile, name, S("mime") is { Length: > 0 } mime ? mime : "application/octet-stream");
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>See <see cref="AudioChannel"/>. A PCM frame is never one byte long.</summary>
     public const byte CancelMarker = 0;
 
