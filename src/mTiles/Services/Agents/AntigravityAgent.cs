@@ -57,6 +57,15 @@ public sealed class AntigravityAgent : AiAgent, Sessions.IConversationalAgent
         Path.Combine(workspaceDir, ".agents", "skills");
     public override string BinaryName => "agy";
 
+    /// <inheritdoc />
+    /// <remarks>Bare, because there is nothing else: agy 1.2.10 has no <c>login</c> subcommand and signs in
+    /// as it starts. It then stays open as an ordinary session, so nothing here can tell the login is done
+    /// — the sentence asks the user to leave it, which is what closes the window.</remarks>
+    public override AgentLogin? Login => new([],
+        "Antigravity asks you to sign in with Google as it starts. Once it is signed in, leave it with " +
+        "/exit and this window closes. If it starts without asking, it is already signed in — use /logout " +
+        "and then /login inside it to sign in again.");
+
     /// <summary>
     /// No, and it is the one agent here where that is an answer rather than a gap.
     /// </summary>

@@ -49,6 +49,10 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
     public Task StartNewConversationAsync() => NewConversationAsync();
     public const string DeleteConversationActionId = "delete-conversation";
 
+    /// <summary>Runs the agent's own login in a terminal drawn over the window — see
+    /// <see cref="AgentLoginLaunch"/>.</summary>
+    public const string SignInActionId = "sign-in";
+
     private readonly string _workingDirectory;
     private readonly SettingsService _settings;
     private readonly IConversationStore _store;
@@ -535,6 +539,10 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
     /// brief, switch without it, or stay. <b>Unwired answers <see cref="HandoverAnswer.Cancel"/>.</b></summary>
     public Func<string, Task<HandoverAnswer>>? ChooseHandover { get; set; }
 
+    /// <summary>Shows a login and answers true once it finished cleanly. <b>Unwired answers null</b> — nothing
+    /// was run, so nothing is restarted.</summary>
+    public Func<AgentLoginLaunch, AppSettings, Task<bool?>>? ShowSignIn { get; set; }
+
     /// <summary>The model alone: the strip's agent picker, one line below, already names the instance, and
     /// the header saying it again was the same words twice on one tile. The terminal agent tile has no such
     /// strip and keeps both.</summary>
@@ -565,7 +573,18 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
         new(NewConversationActionId, "New conversation", "new-conversation", NeedsLocalScreen: true),
         new(DeleteConversationActionId, "Delete this conversation", "delete", IsDestructive: true,
             NeedsLocalScreen: true),
+        .. SignInAction(),
     ];
+
+    /// <summary>Sign in, where this instance's CLI has a login this application knows how to start.</summary>
+    /// <remarks>Needs this machine's screen: the login opens a browser here and prints into a terminal here,
+    /// neither of which a phone can see.</remarks>
+    private IEnumerable<TileAction> SignInAction()
+    {
+        if (AgentLoginLaunch.Offers(Agent, Instance))
+            yield return new(SignInActionId, $"Sign in to {Agent.DisplayName}…", "login",
+                NeedsLocalScreen: true, PreferOverflow: true);
+    }
 
     /// <summary>Opens the stored conversation and starts the agent, once.</summary>
     /// <remarks><b>Once is a flag, not <c>_host is null</c>.</b> The host is only assigned after the store has
@@ -593,9 +612,28 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
             case DeleteConversationActionId:
                 await DeleteConversationAsync();
                 return TileActionResult.Ok;
+            case SignInActionId:
+                await SignInAsync();
+                return TileActionResult.Ok;
             default:
                 return TileActionResult.Refused($"This tile has no '{id}'.");
         }
+    }
+
+    /// <summary>Runs the CLI's own login for the account this tile runs as, and starts the agent again once
+    /// it succeeded — a session that failed on a lapsed login stays failed until it is started anew.</summary>
+    /// <remarks>Not while it works: a busy session is plainly still authenticated, and restarting it would cut a
+    /// turn off for a login it did not need.</remarks>
+    private async Task SignInAsync()
+    {
+        if (ShowSignIn is null) return;
+        if (AgentLoginLaunch.For(Agent, Instance, _settings.Settings, _workingDirectory) is not { } launch) return;
+
+        var instance = Instance;
+        var answer = await ShowSignIn(launch, _settings.Settings);
+        if (AgentLoginLaunch.RestartsAfter(answer, stillOpen: !_disposed,
+                sameInstance: ReferenceEquals(instance, Instance), busy: IsBusy))
+            await StartAsync();
     }
 
     public bool TrySendText(string text, bool submit)
@@ -1265,6 +1303,7 @@ public sealed partial class AgentConversationTileViewModel : ObservableObject,
         OnPropertyChanged(nameof(Instance));
         OnPropertyChanged(nameof(Agent));
         OnPropertyChanged(nameof(HeaderNote));
+        OnPropertyChanged(nameof(Actions));
         Chooser.Draw();
     }
 

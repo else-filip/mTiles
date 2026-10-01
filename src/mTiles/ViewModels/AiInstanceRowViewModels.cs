@@ -216,8 +216,10 @@ public sealed partial class AiSignInViewModel : ObservableObject
 
     /// <summary>Whether Sign in can do anything — it needs an agent to open a tile for.</summary>
     /// <remarks>A row whose agent this build does not have showed the button and did nothing when it
-    /// was pressed; the row is still listed so it can be renamed or removed.</remarks>
-    public bool CanSignIn => !Status.SignedIn && Agent is not null;
+    /// was pressed; the row is still listed so it can be renamed or removed. A row that reads as signed in
+    /// keeps the button where the CLI has a login command: the files say nothing about whether the token in
+    /// them has lapsed, and signing in again is the way out of one that has.</remarks>
+    public bool CanSignIn => Agent is not null && (!Status.SignedIn || Agent.Login is not null);
 
     /// <summary>The line under the name: which CLI, and who it is logged in as.</summary>
     /// <remarks>"Not signed in" is a state with a way out rather than an error, which is why the row

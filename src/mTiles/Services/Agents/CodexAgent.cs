@@ -83,6 +83,11 @@ public sealed class CodexAgent : AiAgent, Sessions.IConversationalAgent
 
     public override string BinaryName => "codex";
 
+    /// <inheritdoc />
+    public override AgentLogin? Login => new(["login"],
+        "Codex opens a page in your browser to sign in with ChatGPT. If no page opens, copy the address " +
+        "below into a browser on this machine. This window closes once you are signed in.");
+
     /// <summary>
     /// <c>CODEX_HOME</c>, measured 2026-08-30 against codex-cli 0.141.0.
     /// </summary>

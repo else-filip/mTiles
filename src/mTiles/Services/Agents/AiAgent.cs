@@ -411,6 +411,9 @@ public abstract class AiAgent : IAiAgent
     public virtual bool SupportsSignIns => false;
 
     /// <inheritdoc />
+    public virtual AgentLogin? Login => null;
+
+    /// <inheritdoc />
     public virtual string? SkillsDirectory(string workspaceDir) => null;
 
     /// <inheritdoc />

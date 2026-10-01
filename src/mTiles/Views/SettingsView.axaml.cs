@@ -59,6 +59,7 @@ public partial class SettingsView : UserControl,
             // model — so the safe answer when it cannot be asked is no.
             vm.ConfirmAction = message =>
                 MessageDialog.ConfirmAsync(this, "Confirm", message, whenUnavailable: false);
+            vm.ShowSignIn = (launch, settings) => AgentSignInView.ShowAsync(this, launch, settings);
             vm.RunSpeechSetup = async () =>
             {
                 if (vm.Dictation is not { } dictation) return;

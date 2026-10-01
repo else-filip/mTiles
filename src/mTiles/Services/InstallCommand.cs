@@ -50,6 +50,11 @@ public static class InstallCommand
     public static string Line(string name, IReadOnlyList<string> arguments, IShellTerminal shell) =>
         Line(name, arguments, shell, ExecutableFinder.Anywhere);
 
+    /// <summary>The same line for a binary already found — an agent's, which
+    /// <see cref="Agents.AiAgentCatalog.Locate"/> holds the answer for.</summary>
+    public static string Line(string name, string? path, IReadOnlyList<string> arguments, IShellTerminal shell) =>
+        Line(name, arguments, shell, _ => path);
+
     private static string Line(string name, IReadOnlyList<string> arguments, IShellTerminal shell,
         Func<string, string?> locate) =>
         string.Join(' ',

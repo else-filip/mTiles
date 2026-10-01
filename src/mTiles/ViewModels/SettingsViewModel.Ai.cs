@@ -1411,17 +1411,55 @@ public partial class SettingsViewModel
     }
 
     /// <summary>
-    /// Opens a tile signed in to nothing yet, so the user can run the CLI's own login command.
+    /// Runs the CLI's own login for a sign-in row — in the terminal drawn over the window, the same one an
+    /// Agent tile opens (<see cref="AgentLoginLaunch"/>), which closes by itself once the login is done.
     /// </summary>
-    /// <remarks>Through <see cref="RunInstallPlan"/>, the tile route kept for plans that need a terminal:
-    /// it needs a terminal in the current workspace, and an OAuth flow prints a URL somebody has
-    /// to read. The command is the bare CLI — its login is a command typed inside it, not a flag.
-    /// </remarks>
+    /// <remarks>An agent with no login command this application knows (<see cref="IAiAgent.Login"/> null)
+    /// still gets a tile through <see cref="RunInstallPlan"/>, on the bare CLI, where the login is a command
+    /// typed inside it and nothing can tell when it is finished.</remarks>
     [RelayCommand]
     private async Task SignInAsync(AiSignInViewModel row)
     {
         if (row.Agent is not { } agent) return;
+        if (agent.Login is null)
+        {
+            await SignInInATileAsync(row, agent);
+            return;
+        }
 
+        if (AgentLoginLaunch.ForSignIn(agent, row.SignIn, row.Name, _settingsService.Settings,
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)) is not { } launch)
+        {
+            await ShowProblemAsync("Sign in", $"Could not create {AiSignInStore.DirectoryFor(row.SignIn)}.");
+            return;
+        }
+
+        if (ShowSignIn is not { } show)
+        {
+            await ShowProblemAsync("Sign in", "The sign-in window could not be opened.");
+            return;
+        }
+
+        // Null is the window closed by hand, which is an answer and not a failure; whatever it was, the
+        // CLI's files may have changed, so the row is read again.
+        await show(launch, _settingsService.Settings);
+        RereadSignIn(row);
+    }
+
+    /// <summary>Replaces a row with one read afresh from the CLI's files — its status is read only when a
+    /// row is built.</summary>
+    private void RereadSignIn(AiSignInViewModel row)
+    {
+        var index = SignIns.IndexOf(row);
+        if (index >= 0) SignIns[index] = new AiSignInViewModel(row.SignIn);
+    }
+
+    /// <summary>Shows a login and answers true once it finished cleanly; null when nothing was shown.</summary>
+    public Func<AgentLoginLaunch, AppSettings, Task<bool?>>? ShowSignIn { get; set; }
+
+    /// <summary>The tile route for a CLI whose login is typed inside it.</summary>
+    private async Task SignInInATileAsync(AiSignInViewModel row, IAiAgent agent)
+    {
         var directory = AiSignInStore.DirectoryFor(row.SignIn);
         // With the agent, which is what creates the directory the CLI is really pointed at — for
         // opencode that is <root>/data, where auth.json lands. This is the one path that sends somebody
@@ -1450,7 +1488,7 @@ public partial class SettingsViewModel
         // run it in. A second type for the same three fields would be two things to keep in step.
         var plan = new InstallPlan(command, [],
             $"Signs in as a separate account, kept in {directory}. "
-            + "Run the tool's own login command in the tile that opens — /login for Claude Code.")
+            + "Run the tool's own login command in the tile that opens.")
         {
             // A login only *starts* at the command: the CLI then prints a URL and waits for the user.
             // In the background that is a process hung on a prompt nobody can see.

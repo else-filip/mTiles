@@ -67,6 +67,14 @@ public sealed class ClaudeAgent : AiAgent, Sessions.IConversationalAgent
     /// with sync on for the workspace, this file always carries the same content as AGENTS.md.</remarks>
     public override string InstructionFile => "CLAUDE.md";
     public override string BinaryName => "claude";
+
+    /// <inheritdoc />
+    /// <remarks>The CLI's own subcommand rather than <c>/login</c> typed into its interface: it exits when
+    /// the login is done, which is what lets the window it runs in close by itself.</remarks>
+    public override AgentLogin? Login => new(["auth", "login"],
+        "Claude Code opens a page in your browser to sign in to your Anthropic account. If no page opens, " +
+        "copy the address below into a browser and paste the code it gives you back here. This window " +
+        "closes once you are signed in.");
     public override string? InstallUrl => "https://docs.anthropic.com/en/docs/claude-code";
     public override SessionStrategy SessionStrategy => SessionStrategy.Fixed;
 

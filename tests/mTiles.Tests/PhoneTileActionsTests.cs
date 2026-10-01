@@ -159,6 +159,8 @@ public sealed class PhoneTileActionsTests
                 mTiles.ViewModels.AgentConversation.AgentConversationTileViewModel.DeleteConversationActionId,
                 mTiles.ViewModels.AgentConversation.AgentConversationTileViewModel.NewConversationActionId,
                 TileActionIds.Restart,
+                // A login opens a browser and a terminal on this machine, neither of which a phone can see.
+                mTiles.ViewModels.AgentConversation.AgentConversationTileViewModel.SignInActionId,
             ],
             withheld.Distinct().Order(StringComparer.Ordinal));
     }

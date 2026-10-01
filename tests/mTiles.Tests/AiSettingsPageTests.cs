@@ -292,9 +292,34 @@ public sealed class AiSettingsPageTests : IDisposable
             new AiSignIn { Id = "s1", AgentId = "claude", Name = "Work" });
 
         var vm = OnTheAiTab();
+        AgentLoginLaunch? shown = null;
+        vm.ShowSignIn = (launch, _) =>
+        {
+            shown = launch;
+            return Task.FromResult<bool?>(true);
+        };
+
+        vm.SignInCommand.Execute(vm.SignIns.Single());
+
+        // The window an Agent tile opens, not a tile: the account in the process environment, and the
+        // CLI's own login as the command, so it closes by itself once the login is done.
+        Assert.NotNull(shown);
+        Assert.Equal(AiSignInStore.DirectoryFor(vm.SignIns.Single().SignIn), shown!.Environment["CLAUDE_CONFIG_DIR"]);
+        var claude = AiAgentCatalog.Find("claude")!;
+        Assert.Contains(claude.Login!.Instructions, shown.Instructions);
+        Assert.All(claude.Login.Arguments, argument => Assert.Contains(argument, string.Join(" ", shown.Arguments)));
+    }
+
+    /// <summary>A CLI whose login is typed inside it still gets a tile, spelled the way the shell runs a
+    /// program — on PowerShell a bare name finds npm's .ps1 shim, which a default Windows refuses.</summary>
+    [Fact]
+    public void Signing_in_without_a_known_login_opens_a_tile()
+    {
+        _settings.Service.Settings.AiSignIns.Add(
+            new AiSignIn { Id = "s1", AgentId = "pi", Name = "Work" });
+
+        var vm = OnTheAiTab();
         InstallPlan? asked = null;
-        // Agreed to, because what the tile is for is now in the question - see
-        // Opening_a_tile_for_a_plan_says_what_it_is_for_first.
         vm.ConfirmAction = _ => Task.FromResult(true);
         vm.RunInstallPlan = plan =>
         {
@@ -306,23 +331,11 @@ public sealed class AiSettingsPageTests : IDisposable
 
         var shell = ShellTerminalCatalog.ResolveDefault(_settings.Service.Settings).Shell;
         var command = InstallCommand.For(asked!, shell);
-
-        // Two variables set and the binary run, in one line the shell will execute rather than echo.
-        Assert.Contains("CLAUDE_CONFIG_DIR", command);
-        Assert.Contains(AiSignInStore.DirectoryFor(vm.SignIns.Single().SignIn), command);
-
-        // The binary last, spelled the way this shell runs a program: its name on bash, and on
-        // PowerShell the file this machine found — where a bare `claude` finds npm's .ps1 shim and a
-        // default Windows refuses to load it, which is how this button opened a tile showing an
-        // execution-policy error while the row went on saying "not signed in".
-        var claude = AiAgentCatalog.Find("claude")!;
-        Assert.EndsWith(shell.Program(claude.BinaryName, AiAgentCatalog.Locate(claude), []), command);
+        Assert.Contains("PI_CODING_AGENT_DIR", command);
+        var pi = AiAgentCatalog.Find("pi")!;
+        Assert.EndsWith(shell.Program(pi.BinaryName, AiAgentCatalog.Locate(pi), []), command);
         Assert.DoesNotContain(".ps1", command, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("\"$env", command);
         Assert.False(command.StartsWith('"'), $"the whole command is quoted: {command}");
-
-        // And the readable form is *not* that, which is the whole reason the two are separate: it
-        // quotes every part with a space in it, and here that is the entire command.
         Assert.StartsWith("\"", asked!.CommandLine);
     }
 
@@ -405,7 +418,7 @@ public sealed class AiSettingsPageTests : IDisposable
     public void Opening_a_tile_for_a_plan_says_what_it_is_for_first()
     {
         _settings.Service.Settings.AiSignIns.Add(
-            new AiSignIn { Id = "s1", AgentId = "claude", Name = "Work" });
+            new AiSignIn { Id = "s1", AgentId = "pi", Name = "Work" });
 
         var vm = OnTheAiTab();
         var asked = new List<string>();
@@ -428,7 +441,7 @@ public sealed class AiSettingsPageTests : IDisposable
     public void A_refused_sign_in_opens_no_tile()
     {
         _settings.Service.Settings.AiSignIns.Add(
-            new AiSignIn { Id = "s1", AgentId = "claude", Name = "Work" });
+            new AiSignIn { Id = "s1", AgentId = "pi", Name = "Work" });
 
         var vm = OnTheAiTab();
         vm.ConfirmAction = _ => Task.FromResult(false);

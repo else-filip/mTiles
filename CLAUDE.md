@@ -733,9 +733,12 @@ Settings dialog as a modal overlay with responsive sizing (50% window width / 80
   the fallback for the launch to work out from the model's context (see `ModelContextWindow`), typed is
   a decision and is handed over unchanged.
   A third list, **Sign-ins**, is the CLI's own logins — a second subscription and a third. A row asks
-  for one thing, what you call it; saving makes the directory and **Sign in** shows what will run and
-  then opens a tile with the agent's environment already set, where the user runs the tool's own login
-  command. It asks the way an install asks, and for a reason beyond symmetry: the sentence naming the
+  for one thing, what you call it; saving makes the directory and **Sign in** runs the CLI's own login
+  (`IAiAgent.Login` — claude, codex, grok, agy) in the window an Agent tile opens (`AgentLoginLaunch`,
+  `Views/AgentSignInView`), the account in the process environment, closing by itself on a clean exit
+  and re-reading the row. **The rest of this paragraph is the fallback** for a CLI with no such command
+  (opencode, pi): Sign in shows what will run and then opens a tile with the agent's environment already
+  set, where the user runs the tool's own login command. It asks the way an install asks, and for a reason beyond symmetry: the sentence naming the
   login command is in the plan's note, the route a plan takes to a tile carries the command alone, and
   without the question that note was built and thrown away — leaving a tile with the environment set, an
   empty prompt, and a row still saying "not signed in". That command goes
@@ -845,6 +848,17 @@ fail a cold resume in silence, and both are now caught before the first message 
 `get_state` `messageCount`, agy's `init` naming another id; measured live 2026-09-17), while Grok 1.0.34
 answers an unknown id with an error. The table is in
 [`docs/AGENT-CONVERSATIONS.md`](docs/AGENT-CONVERSATIONS.md) → *Which conversation a tile is showing*.
+
+**A lapsed login is fixed from the tile** (`… → Sign in to <agent>…`, `IAiAgent.Login`, `AgentLoginLaunch`,
+`Views/AgentSignInView`): the CLI's own login command in a terminal drawn over the window — an overlay, not a
+tile, because it is a question and a tile would stay in the layout after it — with a header saying what is
+about to be asked. Measured 2026-10-01: `claude auth login`, `codex login`, `grok login`, and a bare `agy`,
+which has no login subcommand and signs in as it starts. The account is the instance's sign-in, through
+`SignInEnv` in the process environment; an instance on a provider key offers none. A clean exit closes the
+window and restarts an idle agent; a failure leaves its output on screen. Settings' Sign in runs the same
+command. **Not yet done: recognising the failure** — nothing shows the window by itself when a session dies of
+an expired login; each agent's signal (Claude's `authentication_failed`, codex's `requiresOpenaiAuth`, Grok's
+refused `authenticate`, agy's "not signed in") still has to be measured on a logged-out account.
 
 **The chooser leaves out an agent whose CLI is not installed** (the tile's own instance excepted), as the Terminal agent and Goal tiles do. **Another agent is picked, and the work is handed to it.** No CLI can continue another's session, and that
 was read for a long time as a refusal: another agent was offered dimmed, with a sentence saying to start a

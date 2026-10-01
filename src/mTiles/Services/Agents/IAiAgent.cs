@@ -182,6 +182,17 @@ public interface IAiAgent : IAgentActivityReader
     bool SupportsSignIns { get; }
 
     /// <summary>
+    /// How this CLI is logged in, or null where nothing here knows a way.
+    /// </summary>
+    /// <remarks>Measured 2026-10-01 against the installed binaries: <c>claude auth login</c> (2.1.286),
+    /// <c>codex login</c> (0.156.1), <c>grok login</c>, and agy 1.2.10 with no subcommand at all — it
+    /// answers <c>unknown subcommand: login</c> and its own message is "Launch the CLI without arguments
+    /// to sign in". Null by default, for the reason <see cref="SkillsDirectory"/> is: an agent whose author
+    /// forgets this offers no Sign in, which is a missing button and never a command nobody measured.
+    /// </remarks>
+    AgentLogin? Login { get; }
+
+    /// <summary>
     /// Where this CLI looks for the project's skills, or null when it reads none.
     /// </summary>
     /// <remarks>

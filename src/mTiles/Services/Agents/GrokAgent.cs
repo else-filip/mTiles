@@ -26,6 +26,11 @@ public sealed class GrokAgent : AiAgent, Sessions.IConversationalAgent
     public override string Id => "grok";
     public override string DisplayName => "Grok";
     public override string BinaryName => "grok";
+
+    /// <inheritdoc />
+    public override AgentLogin? Login => new(["login"],
+        "Grok opens a page in your browser to sign in to your xAI account. If no page opens, copy the " +
+        "address below into a browser. This window closes once you are signed in.");
     public override string? InstallUrl => "https://x.ai/cli";
 
     /// <summary>A conversation over ACP — see <see cref="Sessions.Grok.GrokAcpSession"/>.</summary>
